@@ -1,0 +1,23 @@
+include README.md
+include LICENSE
+include CONTRIBUTING.md
+include CHANGELOG.md
+include pyproject.toml
+include setup.py
+
+recursive-include e8zip *.py
+recursive-include tests *.py
+recursive-include benchmarks *.py
+
+exclude .gitignore
+exclude *.bat
+exclude *.sh
+exclude *.spec
+exclude debug_*.py
+exclude test_*.py
+
+prune __pycache__
+prune *.egg-info
+prune .pytest_cache
+prune .vscode
+prune .idea

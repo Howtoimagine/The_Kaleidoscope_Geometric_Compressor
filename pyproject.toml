@@ -1,0 +1,101 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "e8zip"
+version = "1.0.0"
+description = "E8ZIP - Geometric Lattice Compression based on E8 Kaleidoscope Mind"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Skye Malone", email = "skye@example.com"}
+]
+maintainers = [
+    {name = "Skye Malone", email = "skye@example.com"}
+]
+keywords = [
+    "compression",
+    "e8",
+    "lattice",
+    "geometric",
+    "hyperbolic",
+    "black-hole",
+    "holographic",
+    "archive",
+    "zip"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving :: Compression",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+]
+full = [
+    "scipy>=1.9.0",
+    "tqdm>=4.65.0",
+]
+
+[project.scripts]
+e8zip = "e8zip.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/skyemalone/e8zip"
+Documentation = "https://github.com/skyemalone/e8zip#readme"
+Repository = "https://github.com/skyemalone/e8zip"
+Issues = "https://github.com/skyemalone/e8zip/issues"
+Changelog = "https://github.com/skyemalone/e8zip/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["e8zip*"]
+
+[tool.setuptools.package-data]
+e8zip = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
