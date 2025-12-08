@@ -1,7 +1,7 @@
 # KGZIP - Geometric Lattice Compression
 ![Generated Image December 08, 2025 - 11_26AM](https://github.com/user-attachments/assets/58a6886d-7160-4a3c-b24e-cec193ecb523)
 
-> **"Compress paths through the lattice, not just snapshots."**
+> **"Compress geodesic paths through the lattice, not just nodes."**
 
 E8ZIP is a novel compression tool based on the E8 Kaleidoscope Mind's geometric compression algorithms. Unlike traditional compression (LZ77, Huffman) which operates on bit-patterns, E8ZIP operates on **geometric trajectories in hyperbolic-lattice space**.
 
