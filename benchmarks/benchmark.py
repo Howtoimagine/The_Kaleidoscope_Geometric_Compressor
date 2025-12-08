@@ -519,16 +519,10 @@ class Class_{i}:
 
 def print_banner():
     """Print benchmark banner."""
-    print("""
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                                                                               ║
-║     E8ZIP BENCHMARK SUITE                                                     ║
-║     Comparing E8ZIP vs WinZip/7-Zip vs WinRAR                                 ║
-║                                                                               ║
-║     "Compress paths through the lattice, not just snapshots."                 ║
-║                                                                               ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
-""")
+    print("=" * 80)
+    print("E8ZIP BENCHMARK SUITE")
+    print("Comparing E8ZIP vs WinZip/7-Zip vs WinRAR")
+    print("=" * 80)
 
 
 def main():
