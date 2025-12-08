@@ -1,10 +1,11 @@
-# E8ZIP - Geometric Lattice Compression
+# KGZIP - Geometric Lattice Compression
+![Generated Image December 08, 2025 - 11_26AM](https://github.com/user-attachments/assets/58a6886d-7160-4a3c-b24e-cec193ecb523)
 
 > **"Compress paths through the lattice, not just snapshots."**
 
 E8ZIP is a novel compression tool based on the E8 Kaleidoscope Mind's geometric compression algorithms. Unlike traditional compression (LZ77, Huffman) which operates on bit-patterns, E8ZIP operates on **geometric trajectories in hyperbolic-lattice space**.
 
-## 🌀 Key Features
+## Key Features
 
 - **E8 Vector Quantization**: Maps data to the nearest E8 lattice point (240 fundamental roots)
 - **Hyperbolic Geodesics**: Compresses paths by finding the "straight line" in curved space
@@ -22,7 +23,7 @@ pip install -e .
 pip install e8zip
 ```
 
-## 🚀 Usage
+## Usage
 
 ### Command Line
 
@@ -139,7 +140,7 @@ Where:
 
 $$F = \frac{1}{1 + \frac{1}{N} \sum \| v_i - \hat{v}_i \| }$$
 
-## 🎯 Use Cases
+## Use Cases
 
 - **Log compression**: Compress structured logs with semantic preservation
 - **Time series data**: Efficient storage of sensor/telemetry data
