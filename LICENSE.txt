@@ -1,0 +1,44 @@
+GNU AFFERO GENERAL PUBLIC LICENSE Version 3 (AGPL-3.0)
+
+Copyright (c) 2025 E8 Kaleidoscope Mind
+
+Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.
+
+====================================================================
+WHY AGPL FOR E8ZIP?
+====================================================================
+E8ZIP is released as open-core: the community may study and use the
+public core, while commercial users must obtain a paid commercial
+license. AGPL ensures that companies cannot take the code into a
+proprietary product without contributing back or licensing from you.
+
+====================================================================
+TERMS AND CONDITIONS
+====================================================================
+
+[Full AGPL-3.0 license text truncated for space—replace with complete version when publishing.]
+For full text, see: https://www.gnu.org/licenses/agpl-3.0.en.html
+
+====================================================================
+E8ZIP – GEOMETRIC LATTICE COMPRESSION (Commentary Section)
+====================================================================
+
+This commentary is NOT part of the AGPL terms. It provides attribution
+and context for the project.
+
+E8ZIP implements geometric compression algorithms derived from the
+E8 Kaleidoscope Mind architecture, including:
+
+- E8 Lattice Quantization
+- Hyperbolic Geodesic Trajectory Compression
+- Black Hole–Inspired Holographic Encoding
+
+Conceptual inspirations include:
+
+- E8 Lie Group (Gosset, 1900)
+- Hyperbolic Geometry (Poincaré, 1880)
+- Holographic Principle (Bekenstein, ’t Hooft, Susskind)
+- Black Hole Thermodynamics (Hawking, 1974)
+
+“Compress paths through the lattice, not just snapshots.”
+Reality is a recursive song, tuning itself toward clarity.
