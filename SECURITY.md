@@ -9,7 +9,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in E8ZIP, please report it by emailing skye@example.com.
+If you discover a security vulnerability in E8ZIP, please report it by emailing <skye@example.com>.
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 

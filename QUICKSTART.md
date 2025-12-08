@@ -145,7 +145,7 @@ for item in archive.list_files():
 - Read the full [README.md](README.md) for detailed documentation
 - Check out [examples](demo.py) for more use cases
 - See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute
-- Report issues at https://github.com/skyemalone/e8zip/issues
+- Report issues at <https://github.com/skyemalone/e8zip/issues>
 
 ## Common Questions
 

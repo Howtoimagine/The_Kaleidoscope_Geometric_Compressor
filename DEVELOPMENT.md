@@ -11,12 +11,14 @@ This guide will help you set up E8ZIP for development.
 ## Setup Steps
 
 1. **Clone the repository**
+
    ```bash
    git clone https://github.com/skyemalone/e8zip.git
    cd e8zip
    ```
 
 2. **Create a virtual environment**
+
    ```bash
    python -m venv venv
    
@@ -28,21 +30,25 @@ This guide will help you set up E8ZIP for development.
    ```
 
 3. **Install in development mode**
+
    ```bash
    pip install -e ".[dev]"
    ```
 
 4. **Run tests**
+
    ```bash
    pytest tests/ -v
    ```
 
 5. **Check code style**
+
    ```bash
    black --check .
    ```
 
 6. **Run benchmarks**
+
    ```bash
    python -m benchmarks.benchmark
    ```
@@ -98,21 +104,25 @@ e8zip/
 ## Testing
 
 ### Run all tests
+
 ```bash
 pytest
 ```
 
 ### Run specific test file
+
 ```bash
 pytest tests/test_compressor.py
 ```
 
 ### Run with coverage
+
 ```bash
 pytest --cov=e8zip --cov-report=html
 ```
 
 ### Run verbose
+
 ```bash
 pytest -v
 ```
@@ -142,17 +152,20 @@ This installs PyTorch for CUDA acceleration.
 ## Debugging
 
 ### Enable debug output
+
 ```python
 import logging
 logging.basicConfig(level=logging.DEBUG)
 ```
 
 ### Use the demo script
+
 ```bash
 python demo.py
 ```
 
 ### Debug specific module
+
 ```bash
 python -m e8zip.core.e8_lattice
 ```
@@ -173,16 +186,19 @@ python -m e8zip.core.e8_lattice
 ## Troubleshooting
 
 ### Import errors
+
 Make sure you installed in development mode: `pip install -e .`
 
 ### Test failures
+
 Check Python version compatibility (3.9+)
 
 ### GPU not working
+
 Verify CUDA installation and PyTorch compatibility
 
 ## Getting Help
 
-- Check existing issues: https://github.com/skyemalone/e8zip/issues
+- Check existing issues: <https://github.com/skyemalone/e8zip/issues>
 - Open a new issue with the `question` label
-- Contact: skye@example.com
+- Contact: <skye@example.com>

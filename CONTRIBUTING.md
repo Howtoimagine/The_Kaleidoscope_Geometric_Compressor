@@ -32,17 +32,20 @@ Be respectful, inclusive, and professional in all interactions.
 ### Pull Requests
 
 1. **Fork the repository**
+
    ```bash
    git clone https://github.com/skyemalone/e8zip.git
    cd e8zip
    ```
 
 2. **Create a feature branch**
+
    ```bash
    git checkout -b feature/your-feature-name
    ```
 
 3. **Set up development environment**
+
    ```bash
    pip install -e ".[dev]"
    ```
@@ -54,22 +57,26 @@ Be respectful, inclusive, and professional in all interactions.
    - Update documentation as needed
 
 5. **Run tests**
+
    ```bash
    pytest tests/
    ```
 
 6. **Format code**
+
    ```bash
    black .
    ```
 
 7. **Commit your changes**
+
    ```bash
    git add .
    git commit -m "Add feature: description"
    ```
 
 8. **Push to your fork**
+
    ```bash
    git push origin feature/your-feature-name
    ```
@@ -117,6 +124,7 @@ footer (optional)
 ```
 
 Types:
+
 - `feat`: New feature
 - `fix`: Bug fix
 - `docs`: Documentation changes
@@ -126,6 +134,7 @@ Types:
 - `chore`: Build process or auxiliary tool changes
 
 Examples:
+
 ```
 feat(compression): add Leech lattice compression mode
 fix(cli): handle empty input files gracefully
@@ -195,6 +204,6 @@ python -m benchmarks.benchmark
 
 - Open an issue for questions
 - Join discussions in GitHub Discussions
-- Contact: skyemalone@example.com
+- Contact: <skyemalone@example.com>
 
 Thank you for contributing to E8ZIP! 🎉

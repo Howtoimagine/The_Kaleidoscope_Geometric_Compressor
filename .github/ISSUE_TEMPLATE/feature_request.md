@@ -21,6 +21,7 @@ Describe how this feature would be used and what benefits it would provide.
 
 **Impact**
 What impact would this have on:
+
 - [ ] Performance
 - [ ] Compression ratio
 - [ ] API compatibility

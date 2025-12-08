@@ -23,10 +23,10 @@ Please describe the tests that you ran to verify your changes. Provide instructi
 - [ ] Test B
 
 **Test Configuration**:
-* Python version:
-* OS:
+- Python version:
+- OS:
 
-## Checklist:
+## Checklist
 
 - [ ] My code follows the style guidelines of this project
 - [ ] I have performed a self-review of my own code
@@ -38,8 +38,8 @@ Please describe the tests that you ran to verify your changes. Provide instructi
 - [ ] Any dependent changes have been merged and published
 - [ ] I have updated the CHANGELOG.md
 
-## Screenshots (if applicable):
+## Screenshots (if applicable)
 
-## Additional Notes:
+## Additional Notes
 
 Add any other notes about the PR here.

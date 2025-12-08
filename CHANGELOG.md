@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned
+
 - GPU acceleration for E8 lattice quantization
 - Additional compression modes
 - Multi-threaded compression
@@ -16,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - 2025-12-08
 
 ### Added
+
 - Initial release of E8ZIP
 - E8 lattice vector quantization
 - Leech lattice (Lambda_24) experimental compressor
@@ -33,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmark tools for performance testing
 
 ### Features
+
 - `e8zip` CLI tool
 - `e8zip-gui` interactive interface
 - Python package installable via pip
@@ -42,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GPU backend (optional, with PyTorch)
 
 ### Documentation
+
 - README with installation and usage instructions
 - API documentation in code
 - Contributing guidelines
@@ -50,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2025-11-15
 
 ### Added
+
 - Initial proof of concept
 - Basic E8 lattice implementation
 - Simple compression/decompression
