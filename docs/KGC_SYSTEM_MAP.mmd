@@ -1,0 +1,90 @@
+%% KGC v2.1 system map — editable Mermaid source
+%% Keep this map aligned with README.md and ARCHITECTURE.md.
+flowchart TB
+    User["Caller or application"] --> KGC["KGCCompressor"]
+    KGC --> Kind{"Input regime"}
+
+    subgraph ByteRegime["BYTES — exact recovery"]
+        direction TB
+        B0["Byte stream"] --> B1["Deterministic causal predictor"]
+        B1 --> B2["Adaptive byte model"]
+        B2 --> B3["Range encoder"]
+        B3 --> B4{"Coded form smaller?"}
+        B4 -->|"yes"| B5["Predictor program plus residual"]
+        B4 -->|"no"| B6["Raw payload fallback"]
+        P1["geometric"] -. "built in" .-> B1
+        P2["ngram-mix"] -. "optional" .-> B1
+        P3["gru-online"] -. "optional" .-> B1
+        P4["llama-qwen"] -. "optional Qwen GGUF socket" .-> B1
+    end
+
+    subgraph TensorRegime["TENSORS — auditable reconstruction"]
+        direction TB
+        T0["Weights or embeddings"] --> T1["Flatten and pad"]
+        T1 --> T2["Randomized Hadamard transform"]
+        T2 --> T3["Normalize and apply scale s"]
+        T3 --> T4["24-D blocks"]
+        T4 --> T5["Exact Leech CVP"]
+        T5 --> T6["Golay derived address g case z"]
+        T6 --> T7["Range coded lattice residual"]
+        Theta["Leech theta series"] -. "sets optional priors" .-> T7
+        ZPrior["Gaussian z prior"] -. "default and rate winning" .-> T7
+        SPrior["Shell indexed prior"] -. "opt in for audit and progressive decode" .-> T7
+    end
+
+    subgraph ConsolidationRegime["CONSOLIDATE — mass preserving field reduction"]
+        direction TB
+        C0["N by 24 row bank"] --> C1["Scale into Leech cells"]
+        C1 --> C2["Group rows by canonical site"]
+        C2 --> C3["Store group energy and member addresses"]
+        C3 --> C4{"Keep residuals?"}
+        C4 -->|"yes"| C5["XOR exact residuals"]
+        C4 -->|"no"| C6["Auditable lossy collapse"]
+        C3 --> Mass["Conserved group mass"]
+    end
+
+    Kind -->|"bytes"| B0
+    Kind -->|"tensor"| T0
+    Kind -->|"24-D row set"| C0
+
+    B5 --> Container
+    B6 --> Container
+    T7 --> Container
+    C5 --> Container
+    C6 --> Container
+
+    subgraph Debt["KGC2 debt record"]
+        direction LR
+        Container["KGC2 archive"] --> Address["Address — source SHA 256"]
+        Container --> Program["Program — deterministic recipe"]
+        Container --> Residual["Residual — unexplained information"]
+        Container --> Truth["Truth status"]
+    end
+
+    subgraph Recall["Recall-as-rays — optional retrieval over stored rows"]
+        direction TB
+        R0["24-D query and stored row bank"] --> R1["Seeded 24 to 3 projections"]
+        R1 --> R2{"Filter backend"}
+        R2 -->|"CUDA"| R3["Grid probe"]
+        R2 -->|"OptiX"| R4["BVH AABBs and degenerate rays"]
+        R3 --> R5["Cross projection votes"]
+        R4 --> R5
+        R5 --> R6["Exact 24-D GPU re-rank"]
+        R6 --> R7["Ranked recall set"]
+    end
+
+    C0 -. "stored rows can be queried" .-> R0
+
+    classDef core fill:#19152c,color:#ffffff,stroke:#8d7bff,stroke-width:2px
+    classDef bytes fill:#113a2c,color:#ffffff,stroke:#42c98d,stroke-width:2px
+    classDef tensor fill:#3b2036,color:#ffffff,stroke:#f08ab6,stroke-width:2px
+    classDef consolidate fill:#2b304f,color:#ffffff,stroke:#7db1ff,stroke-width:2px
+    classDef recall fill:#183522,color:#ffffff,stroke:#76b900,stroke-width:2px
+    classDef truth fill:#412b12,color:#ffffff,stroke:#ffbd59,stroke-width:2px
+
+    class KGC,Container core
+    class B0,B1,B2,B3,B4,B5,B6,P1,P2,P3,P4 bytes
+    class T0,T1,T2,T3,T4,T5,T6,T7,Theta,ZPrior,SPrior tensor
+    class C0,C1,C2,C3,C4,C5,C6,Mass consolidate
+    class R0,R1,R2,R3,R4,R5,R6,R7 recall
+    class Address,Program,Residual,Truth truth
