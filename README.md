@@ -27,8 +27,8 @@ addresses are refused. Every decode reports its **truth_status** rung:
 
 | Regime | Input | Method | Result (measured, verified round-trip) |
 |---|---|---|---|
-| **BYTES** | any bytes | adaptive context → range coder, raw fallback | lossless, sha256-verified, never expands random data |
-| **TENSOR** | weights / embeddings | randomized Hadamard → exact Leech VQ → entropy-coded `(g_idx, case, z)` | **4.2 bits/weight @ 23.9 dB** — Pareto-dominates scalar INT4 (4.0 bpw @ 15.8 dB) and INT5 (5.0 bpw @ 22.0 dB) |
+| **BYTES** | any bytes | adaptive context → range coder, raw fallback; pluggable predictor front-end (LLM socket) | lossless, sha256-verified, never expands random data |
+| **TENSOR** | weights / embeddings | randomized Hadamard → exact Leech VQ → Gaussian-prior entropy-coded `(g_idx, case, z)` | **4.13 bits/weight @ 23.9 dB** — Pareto-dominates scalar INT4 (4.0 bpw @ 15.8 dB) and INT5 (5.0 bpw @ 22.0 dB) |
 | **CONSOLIDATE** | row sets (embeddings, KV) | RG collapse to canonical Leech sites, conserved mass, member addresses | up to 8.3× with 0.000 % mass drift; bitwise-exact mode available |
 
 ```python
@@ -38,6 +38,12 @@ kgc = KGCCompressor()
 
 blob = kgc.compress(data)                      # bytes  -> lossless, verified
 data, info = kgc.decompress(blob)              # info["truth_status"] == "exact_recovery"
+
+blob = kgc.compress(data,                      # LLM socket: any deterministic
+    mode="predictor:gru-online")               # next-byte model drives the coder;
+                                               # the model trains during BOTH
+                                               # encode and decode - no weights
+                                               # ride in the archive
 
 blob = kgc.compress_tensor(W, scale=4.0)       # weights -> ~4 bits/weight lattice VQ
 W2, info = kgc.decompress_tensor(blob)
@@ -54,6 +60,31 @@ optimal against exhaustive coset search), whose 12-bit Golay coset labels
 double as an error-correcting layer: `LeechCodec.heal_index` repairs up
 to 3 flipped bits in any stored index. Run `python benchmarks/benchmark_kgc.py`
 to reproduce every number above; losing baselines are printed too.
+
+### v2.1: theta priors, the LLM socket, and recall-as-rays
+
+- **Exact Leech theta series** for arbitrary shells
+  (`Θ = E₁₂ − (65520/691)Δ`, integer arithmetic) now drives the tensor
+  regime's priors. The zero-side-information Gaussian z prior is the new
+  default (4.20 → 4.13 bpw); explicit shell-indexed coding was measured
+  as a net rate loss and is opt-in only — the negative result is
+  documented, not hidden.
+- **Predictor front-end** (`core/predictor.py`): compression is
+  prediction — any deterministic causal model emitting next-byte
+  probabilities plugs into the range coder. Ships `ngram-mix`
+  (dependency-free) and `gru-online` (NNCP-style GRU trained online
+  during encode *and* decode from a fixed seed). Archives store only the
+  predictor's registry name.
+- **Recall-as-rays** (`core/recall.py`, `core/recall_gpu.py`,
+  `core/rt_optix.py`): k-NN recall over stored 24-D rows via random
+  24→3 projections, radius filter, cross-projection voting, exact
+  re-rank — on CPU, CUDA cores, and **real NVIDIA RT cores via OptiX**
+  (degenerate rays against a BVH of per-row bounding boxes). Measured on
+  an RTX 3070 Ti: RT cores are the fastest method at saturating batches
+  (0.009 ms/query) and the only one at recall@10 = 1.000; the CUDA grid
+  probe wins latency at multi-million-row scale. Study + install recipe:
+  [docs/RT_RECALL.md](docs/RT_RECALL.md). Deep map of the whole system:
+  [docs/KGC_ICEBERG.md](docs/KGC_ICEBERG.md).
 
 *The v1 modes below remain for `.e8z` compatibility. Their honest
 assessment is in [ARCHITECTURE.md](ARCHITECTURE.md).*

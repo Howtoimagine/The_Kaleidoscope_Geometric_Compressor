@@ -32,3 +32,6 @@ htmlcov/
 # E8ZIP specific
 *.e8z
 *.bak
+
+# Local agent config/skills ported from other projects - not part of this repo
+.agents/

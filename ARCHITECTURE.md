@@ -30,7 +30,9 @@ reports a truth_status rung borrowed from the KMind language decoder:
 ```
 core/entropy.py        carry-less range coder (mod 2^32, Subbotin style)
                        + adaptive Fenwick-tree models (order-1, order-2,
-                       experimental E8-trajectory context)
+                       experimental E8-trajectory context). Models accept
+                       an initial prior (v2.1) with a raised rescale
+                       ceiling, so analytic priors save warm-up bits.
 core/golay.py          [24,12,8] extended Golay: systematic G=[I|B],
                        B = bordered QR(11), Pless arithmetic syndrome
                        decoder (heals <=3 bit errors, detects 4)
@@ -38,7 +40,22 @@ core/leech_lattice.py  exact Leech CVP (Conway-Sloane Construction A,
                        vectorized over all 4096 Golay cosets x 2 cases)
                        + bijective index decomposition
                            y = 2g + i*1 + 4z  <->  (g_idx, case, z)
+                       + exact theta series for arbitrary shells (v2.1):
+                           Theta = E_12 - (65520/691)*Delta
+                       and the max-entropy shell prior it implies
 core/kgc.py            the KGC2 container + three regime front-ends
+core/predictor.py      predictor front-end for BYTES (v2.1): any
+                       deterministic causal next-byte model drives the
+                       range coder; ngram-mix reference, gru-online
+                       (NNCP-style, trains during encode AND decode),
+                       CallablePredictor adapter for external LLMs
+core/recall.py         recall bake-off, CPU reference: exact GEMM,
+                       Leech-cell hash (CVP as LSH), RT-style
+                       multi-projection filter (v2.1)
+core/recall_gpu.py     the same pipeline on CUDA cores via torch (v2.1)
+core/rt_optix.py       the same pipeline on RT cores via OptiX (v2.1):
+                       NVRTC-compiled degenerate-ray any-hit programs
+                       over a GAS of per-row AABBs
 ```
 
 The index decomposition is what makes the lattice *codeable*: 12 bits of
@@ -57,9 +74,13 @@ BYTES        input bytes -> adaptive context model -> range coder
 TENSOR       flatten -> randomized Hadamard (incoherence, QuIP#) ->
              normalize -> scale (the rate-distortion knob) -> 24-D
              blocks -> exact Leech CVP -> entropy-coded (g,i,z).
-             Measured: 4.20 bits/weight @ 23.9 dB SNR on Gaussian
-             weights vs INT4 scalar 4.0 bpw @ 15.8 dB and INT5
-             5.0 bpw @ 22.0 dB - Pareto-dominant at every tested rate.
+             v2.1 default seeds the z model with the discretized
+             Gaussian implied by scale (FLAG_Z_PRIOR, header flags
+             byte; 2.0 archives still decode).
+             Measured: 4.13 bits/weight @ 23.9 dB SNR on Gaussian
+             weights (was 4.20 before the z prior) vs INT4 scalar
+             4.0 bpw @ 15.8 dB and INT5 5.0 bpw @ 22.0 dB -
+             Pareto-dominant at every tested rate.
 
 CONSOLIDATE  (N,24) rows *rg_scale -> Leech sites (block-spin RG step);
              rows sharing a site collapse to one representative.
@@ -77,21 +98,48 @@ The math is ported from the Glass Network (glass_windows branch):
 `consolidation.py` / `renormalization.py` / `store.py` (conserved-mass
 RG collapse), `law_registry.py` (Law 9). The Leech theta series
 `Theta = E_12 - (65520/691)*Delta` = (1, 0, 196560, 16773120, ...) is
-tabulated in `core/leech_lattice.py` as the natural shell prior
-(wiring it into the index models is future work).
+computed exactly for arbitrary shells in `core/leech_lattice.py`
+(pentagonal-number-theorem expansion of Delta, integer arithmetic) and
+wired into the codec as of v2.1 — see "theta priors" below.
+
+### Theta priors: what won and what lost (v2.1, measured)
+
+Two priors fall out of the max-entropy lattice-Gaussian analysis:
+
+- **Gaussian z prior (WON, now default):** seed the z-translation model
+  with the discretized Gaussian implied by `scale`. Zero side
+  information, ~1.5 bits/block of warm-up saved, 4.20 -> 4.13 bpw at
+  identical SNR.
+- **Shell-indexed coding (LOST, opt-in only):** entropy-code each
+  block's shell against P(shell n) ~ N(2n)*exp(-n/scale^2), condition z
+  on shell buckets. The shell is deterministic given (g, i, z), so
+  H(shell) + H(g,i,z | shell) = H(g,i,z) — explicit shell coding can at
+  best break even, and in practice its ~8 bits/block cost only recovers
+  ~2 via easier conditional modeling: **net +0.24 bpw**. Kept behind
+  `use_shell_prior=True` for progressive decode / shell auditing,
+  documented as a rate loss. (Falsification-first: the measured negative
+  result is part of the architecture record.)
 
 ### Honest limits
 
 - The byte regime loses to LZ codecs on match-heavy data (zlib 4.16x vs
   KGC 2.78x on Python source). Its contribution is the verified debt
   container and geometric context modeling, not LZ replacement. The
-  planned LLM-predictor entropy front-end is what makes this regime
-  state-of-the-art on in-distribution data.
+  LLM-predictor front-end now exists (`core/predictor.py`,
+  `mode="predictor:<name>"`): on 8 KB of source, ngram-mix reaches
+  2.87x and the online-trained GRU 2.68x vs order-2's 2.28x — the GRU
+  proves the deterministic-replay socket (no weights in the archive) at
+  ~1 ms/byte; plugging a pretrained byte-LLM into `CallablePredictor`
+  is the remaining step to state-of-the-art on in-distribution data.
 - The tensor regime is deliberately lossy (like all PTQ weight
   compression); rate and distortion are always reported together.
-- Leech CVP is exact but CPU-heavy in pure numpy (~35 blocks/s). The
-  GPU path (BVH/RT-core nearest-neighbor search, prototyped in the
-  Glass Network) is future work.
+- Leech CVP is exact but CPU-heavy in pure numpy (~35 blocks/s); a CUDA
+  CVP kernel remains future work. GPU *recall* over stored rows,
+  however, is built and measured (`core/recall_gpu.py` CUDA cores,
+  `core/rt_optix.py` RT cores): at a saturating batch the RT-core
+  filter is the fastest method (0.009 ms/query, recall 1.000 at
+  r=1.5) while at multi-million-row scale the CUDA grid probe wins
+  latency on Ampere hardware — full numbers in docs/RT_RECALL.md.
 
 ---
 

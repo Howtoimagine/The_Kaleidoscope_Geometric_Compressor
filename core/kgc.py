@@ -50,9 +50,11 @@ from e8zip.core.entropy import (
     RangeEncoder,
 )
 from e8zip.core.leech_lattice import (
+    SQRT8,
     batch_nearest_leech_point,
     leech_index_decompose,
     leech_index_reconstruct,
+    shell_prior,
 )
 
 MAGIC = b"KGC2"
@@ -81,6 +83,11 @@ PROG_RAW = 0
 PROG_ORDER1 = 1
 PROG_GEOMETRIC = 2
 PROG_ORDER2 = 3
+PROG_PREDICTOR = 4
+
+# Header flags
+FLAG_SHELL_PRIOR = 0x01  # tensor regime: theta-series shell-indexed coding
+FLAG_Z_PRIOR = 0x02  # tensor regime: Gaussian-prior-seeded z model
 
 
 class Law9Error(ValueError):
@@ -112,10 +119,10 @@ def _unpack_stream(data: bytes, offset: int) -> Tuple[bytes, int]:
     return data[offset : offset + n], offset + n
 
 
-def _header(regime: int, truth: int, debt: DebtRecord) -> bytes:
+def _header(regime: int, truth: int, debt: DebtRecord, flags: int = 0) -> bytes:
     return (
         MAGIC
-        + struct.pack("<BBBB", VERSION, regime, truth, 0)
+        + struct.pack("<BBBB", VERSION, regime, truth, flags)
         + struct.pack("<Q", debt.source_length)
         + debt.source_sha256
         + struct.pack("<dI", debt.conserved_mass, debt.member_count)
@@ -125,17 +132,17 @@ def _header(regime: int, truth: int, debt: DebtRecord) -> bytes:
 HEADER_SIZE = 4 + 4 + 8 + 32 + 12
 
 
-def _parse_header(data: bytes) -> Tuple[int, int, DebtRecord, int]:
+def _parse_header(data: bytes) -> Tuple[int, int, int, DebtRecord, int]:
     if data[:4] != MAGIC:
         raise ValueError("not a KGC2 archive")
-    version, regime, truth, _flags = struct.unpack_from("<BBBB", data, 4)
+    version, regime, truth, flags = struct.unpack_from("<BBBB", data, 4)
     if version != VERSION:
         raise ValueError(f"unsupported KGC version {version}")
     (source_length,) = struct.unpack_from("<Q", data, 8)
     sha = data[16:48]
     mass, members = struct.unpack_from("<dI", data, 48)
     debt = DebtRecord(sha, source_length, mass, members)
-    return regime, truth, debt, HEADER_SIZE
+    return regime, truth, flags, debt, HEADER_SIZE
 
 
 # ======================================================================
@@ -151,26 +158,44 @@ def compress_bytes(data: bytes, mode: str = "strong") -> bytes:
           'strong'    -> order-2 adaptive context (default)
           'geometric' -> E8-trajectory context (experimental: the data's
                          path through E8 space is the context state)
+          'predictor' or 'predictor:<name>'
+                      -> pluggable predictor front-end (LLM socket).
+                         The archive stores the predictor's registry
+                         name; decompression requires the same
+                         predictor registered (see core/predictor.py).
     Falls back to raw storage whenever the model fails to shrink the
     data (random input stays ~1.0x instead of expanding).
     """
     debt = DebtRecord(_sha(data), len(data))
+    pred_name = b""
 
     if mode == "fast":
         prog, coded = PROG_ORDER1, Order1ByteModel().compress(data)
     elif mode == "strong":
         prog, coded = PROG_ORDER2, Order2ByteModel().compress(data)
+    elif mode.startswith("predictor"):
+        from e8zip.core.predictor import PredictorByteModel, get_predictor
+
+        name = mode.split(":", 1)[1] if ":" in mode else "ngram-mix"
+        prog = PROG_PREDICTOR
+        coded = PredictorByteModel(get_predictor(name)).compress(data)
+        pred_name = struct.pack("<B", len(name.encode())) + name.encode()
     else:
         prog, coded = PROG_GEOMETRIC, GeometricContextModel().compress(data)
 
-    if len(coded) >= len(data):  # honest fallback, never expand
-        prog, coded = PROG_RAW, data
+    if len(pred_name) + len(coded) >= len(data):  # honest fallback, never expand
+        prog, coded, pred_name = PROG_RAW, data, b""
 
-    return _header(REGIME_BYTES, EXACT_RECOVERY, debt) + struct.pack("<B", prog) + coded
+    return (
+        _header(REGIME_BYTES, EXACT_RECOVERY, debt)
+        + struct.pack("<B", prog)
+        + pred_name
+        + coded
+    )
 
 
 def decompress_bytes(data: bytes) -> Tuple[bytes, Dict[str, Any]]:
-    regime, truth, debt, off = _parse_header(data)
+    regime, truth, _flags, debt, off = _parse_header(data)
     if regime != REGIME_BYTES:
         raise ValueError("archive is not byte-regime")
     (prog,) = struct.unpack_from("<B", data, off)
@@ -184,6 +209,14 @@ def decompress_bytes(data: bytes) -> Tuple[bytes, Dict[str, Any]]:
         out = Order2ByteModel().decompress(payload, debt.source_length)
     elif prog == PROG_GEOMETRIC:
         out = GeometricContextModel().decompress(payload, debt.source_length)
+    elif prog == PROG_PREDICTOR:
+        from e8zip.core.predictor import PredictorByteModel, get_predictor
+
+        (name_len,) = struct.unpack_from("<B", payload, 0)
+        name = payload[1 : 1 + name_len].decode()
+        out = PredictorByteModel(get_predictor(name)).decompress(
+            payload[1 + name_len :], debt.source_length
+        )
     else:
         raise ValueError(f"unknown byte program {prog}")
 
@@ -231,8 +264,27 @@ def _unzigzag(u: np.ndarray) -> np.ndarray:
     return np.where(u % 2 == 0, u // 2, -(u + 1) // 2).astype(np.int64)
 
 
+def _shell_bucket(shells: np.ndarray, n_shell_sym: int) -> np.ndarray:
+    """Map shells to one of 16 context buckets for conditional z coding."""
+    width = max(1, (n_shell_sym + 15) // 16)
+    return np.minimum(shells // width, 15)
+
+
+def _z_gaussian_prior(z_alpha: int, sigma_z: float) -> np.ndarray:
+    """Discretized Gaussian prior over zigzag-coded z translations."""
+    u = np.arange(z_alpha, dtype=np.int64)
+    z = np.where(u % 2 == 0, u // 2, -(u + 1) // 2).astype(np.float64)
+    s2 = max(sigma_z, 1e-6) ** 2
+    return np.exp(-(z**2) / (2 * s2))
+
+
 def compress_tensor(
-    w: np.ndarray, scale: float = 4.0, hadamard_dim: int = 128, seed: int = 42
+    w: np.ndarray,
+    scale: float = 4.0,
+    hadamard_dim: int = 128,
+    seed: int = 42,
+    use_shell_prior: bool = False,
+    use_z_prior: bool = True,
 ) -> bytes:
     """
     Lattice-VQ compression of a weight/embedding tensor.
@@ -244,6 +296,22 @@ def compress_tensor(
     `scale` is the rate-distortion knob: higher = more bits, higher SNR.
     This is deliberately lossy (like every PTQ method); the archive
     carries the source hash so downstream fidelity is auditable.
+
+    Priors (both derived from the max-entropy lattice-Gaussian analysis
+    of the theta series):
+
+    use_z_prior (default) seeds the z-translation model with the
+    discretized Gaussian implied by `scale` — saves ~1.5 bits/block of
+    adaptation warm-up with zero side information.
+
+    use_shell_prior additionally entropy-codes each block's shell index
+    against the theta-series max-entropy prior P(shell n) ~
+    N(2n)*exp(-n/scale^2) and conditions z on shell buckets. The shell
+    is deterministic given (g, i, z), so this spends ~8 bits/block of
+    side information and only recovers ~2 via conditioning — measured
+    NET LOSS of ~0.24 bits/weight at scale 4. Kept because shell-indexed
+    archives support progressive decode and shell-level auditing; do not
+    enable it for pure rate.
     """
     w = np.asarray(w, dtype=np.float64)
     orig_shape = w.shape
@@ -267,21 +335,42 @@ def compress_tensor(
     pad_b = (-x.size) % 24
     xb = np.concatenate([x, np.zeros(pad_b)]).reshape(-1, 24)
 
-    points, _, _ = batch_nearest_leech_point(xb)
+    points, shells, _ = batch_nearest_leech_point(xb)
     g_idx, case, z = leech_index_decompose(points)
-    zz = _zigzag(z.ravel())
-    z_alpha = int(zz.max()) + 1 if zz.size else 1
+    zz2d = _zigzag(z)
+    zz = zz2d.ravel()
+    z_alpha = max(int(zz.max()) + 1 if zz.size else 1, 2)
 
-    # Entropy-code the three streams
     enc = RangeEncoder()
     m_g = AdaptiveModel(4096)
     m_c = AdaptiveModel(2)
-    m_z = AdaptiveModel(max(z_alpha, 2))
-    for i in range(len(g_idx)):
-        m_g.encode(enc, int(g_idx[i]))
-        m_c.encode(enc, int(case[i]))
-    for u in zz:
-        m_z.encode(enc, int(u))
+
+    z_prior = _z_gaussian_prior(z_alpha, scale * SQRT8 / 4.0)
+    if use_shell_prior:
+        flags = FLAG_SHELL_PRIOR | FLAG_Z_PRIOR
+        n_shell_sym = max(int(shells.max()) + 1 if shells.size else 1, 2)
+        m_s = AdaptiveModel(n_shell_sym, prior=shell_prior(n_shell_sym, scale))
+        buckets = _shell_bucket(shells, n_shell_sym)
+        m_z_by_bucket: Dict[int, AdaptiveModel] = {}
+        for i in range(len(g_idx)):
+            m_s.encode(enc, int(shells[i]))
+            m_g.encode(enc, int(g_idx[i]))
+            m_c.encode(enc, int(case[i]))
+            b = int(buckets[i])
+            m_z = m_z_by_bucket.get(b)
+            if m_z is None:
+                m_z = m_z_by_bucket[b] = AdaptiveModel(z_alpha, prior=z_prior)
+            for u in zz2d[i]:
+                m_z.encode(enc, int(u))
+    else:
+        flags = FLAG_Z_PRIOR if use_z_prior else 0
+        n_shell_sym = 0
+        m_z = AdaptiveModel(z_alpha, prior=z_prior if use_z_prior else None)
+        for i in range(len(g_idx)):
+            m_g.encode(enc, int(g_idx[i]))
+            m_c.encode(enc, int(case[i]))
+        for u in zz:
+            m_z.encode(enc, int(u))
     coded = enc.finish()
 
     params = struct.pack(
@@ -294,16 +383,18 @@ def compress_tensor(
         seed,
         len(orig_shape),
     ) + struct.pack(f"<{len(orig_shape)}I", *orig_shape)
+    extra = struct.pack("<I", n_shell_sym) if flags & FLAG_SHELL_PRIOR else b""
     return (
-        _header(REGIME_TENSOR, RECONSTRUCTION, debt)
+        _header(REGIME_TENSOR, RECONSTRUCTION, debt, flags)
         + params
-        + struct.pack("<I", max(z_alpha, 2))
+        + struct.pack("<I", z_alpha)
+        + extra
         + _pack_stream(coded)
     )
 
 
 def decompress_tensor(data: bytes) -> Tuple[np.ndarray, Dict[str, Any]]:
-    regime, truth, debt, off = _parse_header(data)
+    regime, truth, flags, debt, off = _parse_header(data)
     if regime != REGIME_TENSOR:
         raise ValueError("archive is not tensor-regime")
 
@@ -315,20 +406,38 @@ def decompress_tensor(data: bytes) -> Tuple[np.ndarray, Dict[str, Any]]:
     off += 4 * ndim
     (z_alpha,) = struct.unpack_from("<I", data, off)
     off += 4
+    if flags & FLAG_SHELL_PRIOR:
+        (n_shell_sym,) = struct.unpack_from("<I", data, off)
+        off += 4
     coded, off = _unpack_stream(data, off)
 
     dec = RangeDecoder(coded)
     m_g = AdaptiveModel(4096)
     m_c = AdaptiveModel(2)
-    m_z = AdaptiveModel(z_alpha)
     g_idx = np.empty(n_blocks, dtype=np.int64)
     case = np.empty(n_blocks, dtype=np.int64)
-    for i in range(n_blocks):
-        g_idx[i] = m_g.decode(dec)
-        case[i] = m_c.decode(dec)
     zz = np.empty(n_blocks * 24, dtype=np.int64)
-    for i in range(n_blocks * 24):
-        zz[i] = m_z.decode(dec)
+    z_prior = _z_gaussian_prior(z_alpha, scale * SQRT8 / 4.0)
+    if flags & FLAG_SHELL_PRIOR:
+        m_s = AdaptiveModel(n_shell_sym, prior=shell_prior(n_shell_sym, scale))
+        m_z_by_bucket: Dict[int, AdaptiveModel] = {}
+        for i in range(n_blocks):
+            shell = m_s.decode(dec)
+            g_idx[i] = m_g.decode(dec)
+            case[i] = m_c.decode(dec)
+            b = int(_shell_bucket(np.asarray(shell), n_shell_sym))
+            m_z = m_z_by_bucket.get(b)
+            if m_z is None:
+                m_z = m_z_by_bucket[b] = AdaptiveModel(z_alpha, prior=z_prior)
+            for j in range(24):
+                zz[i * 24 + j] = m_z.decode(dec)
+    else:
+        m_z = AdaptiveModel(z_alpha, prior=z_prior if flags & FLAG_Z_PRIOR else None)
+        for i in range(n_blocks):
+            g_idx[i] = m_g.decode(dec)
+            case[i] = m_c.decode(dec)
+        for i in range(n_blocks * 24):
+            zz[i] = m_z.decode(dec)
     z = _unzigzag(zz).reshape(n_blocks, 24)
 
     points = leech_index_reconstruct(g_idx, case, z)
@@ -498,7 +607,7 @@ def _mass_scaled_recon(
 
 
 def deconsolidate(data: bytes) -> Tuple[np.ndarray, Dict[str, Any]]:
-    regime, truth, debt, off = _parse_header(data)
+    regime, truth, _flags, debt, off = _parse_header(data)
     if regime != REGIME_CONSOLIDATE:
         raise ValueError("archive is not consolidate-regime")
 
@@ -592,7 +701,7 @@ class KGCCompressor:
     @staticmethod
     def inspect(blob: bytes) -> Dict[str, Any]:
         """Read an archive's debt record without decoding the payload."""
-        regime, truth, debt, _ = _parse_header(blob)
+        regime, truth, _flags, debt, _ = _parse_header(blob)
         return {
             "regime": {1: "bytes", 2: "tensor", 3: "consolidate"}.get(regime),
             "truth_status": TRUTH_NAMES.get(truth),

@@ -24,6 +24,7 @@ Based on:
 - Glass Network KMind leech.py / golay.py (glass_windows)
 """
 
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import List, Optional, Sequence, Tuple
@@ -39,6 +40,86 @@ SQRT8 = 2.8284271247461903
 # tau(n) == sigma_11(n) mod 691). The shell populations are the natural
 # maximum-entropy prior for shell-indexed entropy coding.
 THETA_SERIES = (1, 0, 196560, 16773120, 398034000, 4629381120)
+
+
+@lru_cache(maxsize=8)
+def theta_series(n_max: int) -> Tuple[int, ...]:
+    """
+    Exact Leech theta coefficients N(2n) for n = 0..n_max (arbitrary n).
+
+    Theta_Lambda = E_12 - (65520/691) * Delta, i.e. for n >= 1
+        N(2n) = (65520/691) * (sigma_11(n) - tau(n)),
+    with tau from Delta = q * prod_{m>=1} (1 - q^m)^24. The Euler product
+    is expanded by the pentagonal number theorem, then raised to the 24th
+    power by squaring; everything stays in exact Python integers.
+    """
+    n_terms = n_max + 1
+
+    # Euler function prod (1 - q^m) mod q^n_terms (pentagonal number theorem)
+    euler = [0] * n_terms
+    euler[0] = 1
+    k = 1
+    while k * (3 * k - 1) // 2 < n_terms:
+        sign = -1 if k % 2 else 1
+        for g in (k * (3 * k - 1) // 2, k * (3 * k + 1) // 2):
+            if g < n_terms:
+                euler[g] = sign
+        k += 1
+
+    def _mul(a: List[int], b: List[int]) -> List[int]:
+        out = [0] * n_terms
+        for i, ai in enumerate(a):
+            if ai:
+                for j in range(min(len(b), n_terms - i)):
+                    if b[j]:
+                        out[i + j] += ai * b[j]
+        return out
+
+    # euler^24 = ((euler^2)^2 * euler^2)^... : 24 = 16 + 8
+    e2 = _mul(euler, euler)
+    e4 = _mul(e2, e2)
+    e8 = _mul(e4, e4)
+    e16 = _mul(e8, e8)
+    eta24 = _mul(e16, e8)  # tau(n) = eta24[n-1]
+
+    # sigma_11 by divisor sieve
+    sigma11 = [0] * n_terms
+    for d in range(1, n_terms):
+        p = d**11
+        for m in range(d, n_terms, d):
+            sigma11[m] += p
+
+    coeffs = [1]
+    for n in range(1, n_terms):
+        num = 65520 * (sigma11[n] - eta24[n - 1])
+        q, r = divmod(num, 691)
+        if r:
+            raise ArithmeticError(f"theta coefficient {n} not integral")
+        coeffs.append(q)
+    return tuple(coeffs)
+
+
+def shell_prior(n_shells: int, sigma: float) -> np.ndarray:
+    """
+    Maximum-entropy shell prior for a Gaussian source of per-coordinate
+    std `sigma` quantized to the Leech lattice.
+
+    P(shell n) ~ N(2n) * exp(-n / sigma^2): shell population (theta
+    series) times the Gaussian radial density at squared norm 2n.
+    Returns a normalized probability vector of length n_shells.
+    """
+    if n_shells < 1:
+        raise ValueError("n_shells must be >= 1")
+    coeffs = theta_series(n_shells - 1)
+    s2 = max(float(sigma) ** 2, 1e-12)
+    logs = np.array(
+        [math.log(c) if c > 0 else -math.inf for c in coeffs], dtype=np.float64
+    )
+    logs -= np.arange(n_shells, dtype=np.float64) / s2
+    logs -= logs[np.isfinite(logs)].max()
+    w = np.exp(logs)
+    total = w.sum()
+    return w / total if total > 0 else np.full(n_shells, 1.0 / n_shells)
 
 
 @dataclass
