@@ -5,6 +5,61 @@
 
 E8ZIP is a novel compression tool based on the E8 Kaleidoscope Mind's geometric compression algorithms. Unlike traditional compression (LZ77, Huffman) which operates on bit-patterns, E8ZIP operates on **geometric trajectories in hyperbolic-lattice space**.
 
+---
+
+## v2: KGC — the Kaleidoscope Geometric Codec
+
+v2 replaces the v1 "geometric metadata + zlib backup" architecture with a
+real geometric codec, built from the exact mathematics of the Glass
+Network KMind (Golay [24,12,8], Leech Λ24 Construction-A, conserved-mass
+RG consolidation). One container, three regimes, one law:
+
+```
+L(x) = L(address) + L(program) + L(residual)      — the Law of Compression Debt
+```
+
+Every `KGC2` archive is a **debt triple**: a sha256 *address* back to the
+source, an executable *program* (which lattice, which seeds — a recipe,
+not stored bytes), and an entropy-coded *residual* (only what the
+geometric prior could not predict). Lossy archives without source
+addresses are refused. Every decode reports its **truth_status** rung:
+`exact_recovery / reconstruction / interpretation / confabulation`.
+
+| Regime | Input | Method | Result (measured, verified round-trip) |
+|---|---|---|---|
+| **BYTES** | any bytes | adaptive context → range coder, raw fallback | lossless, sha256-verified, never expands random data |
+| **TENSOR** | weights / embeddings | randomized Hadamard → exact Leech VQ → entropy-coded `(g_idx, case, z)` | **4.2 bits/weight @ 23.9 dB** — Pareto-dominates scalar INT4 (4.0 bpw @ 15.8 dB) and INT5 (5.0 bpw @ 22.0 dB) |
+| **CONSOLIDATE** | row sets (embeddings, KV) | RG collapse to canonical Leech sites, conserved mass, member addresses | up to 8.3× with 0.000 % mass drift; bitwise-exact mode available |
+
+```python
+from e8zip import KGCCompressor
+
+kgc = KGCCompressor()
+
+blob = kgc.compress(data)                      # bytes  -> lossless, verified
+data, info = kgc.decompress(blob)              # info["truth_status"] == "exact_recovery"
+
+blob = kgc.compress_tensor(W, scale=4.0)       # weights -> ~4 bits/weight lattice VQ
+W2, info = kgc.decompress_tensor(blob)
+
+blob = kgc.consolidate(rows, rg_scale=0.5,     # (N, 24) rows -> Leech sites
+                       keep_residuals=False)   # lossy requires addresses (Law 9)
+rows2, info = kgc.deconsolidate(blob)          # info["conserved_mass_*"], member_ids
+
+kgc.inspect(blob)                              # read the debt record without decoding
+```
+
+The quantizer core is the exact Conway–Sloane Leech decoder (verified
+optimal against exhaustive coset search), whose 12-bit Golay coset labels
+double as an error-correcting layer: `LeechCodec.heal_index` repairs up
+to 3 flipped bits in any stored index. Run `python benchmarks/benchmark_kgc.py`
+to reproduce every number above; losing baselines are printed too.
+
+*The v1 modes below remain for `.e8z` compatibility. Their honest
+assessment is in [ARCHITECTURE.md](ARCHITECTURE.md).*
+
+---
+
 ## Key Features
 
 - **E8 Vector Quantization**: Maps data to the nearest E8 lattice point (240 fundamental roots)

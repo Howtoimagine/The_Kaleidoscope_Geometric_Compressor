@@ -13,10 +13,20 @@ Features:
 - 6 compression modes (FAST, NORMAL, ULTRA, MYTHIC, LEECH, QUIP)
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "E8 Kaleidoscope Mind"
 
+# Self-alias: the repository uses a flat layout (package contents at the
+# repo root) while all internal imports use the absolute `e8zip.` prefix.
+# Registering this module as `e8zip` makes the package importable no
+# matter what directory name it was cloned into.
+import sys as _sys
+
+if "e8zip" not in _sys.modules:
+    _sys.modules["e8zip"] = _sys.modules[__name__]
+
 from e8zip.core.compressor import E8Compressor, CompressionMode
+from e8zip.core.kgc import KGCCompressor, Law9Error
 from e8zip.core.codec import E8GeometricCodec
 from e8zip.core.trajectory import TrajectoryCompressor, CompressedTrajectory
 from e8zip.core.black_hole import BlackHoleCompressor
@@ -46,6 +56,8 @@ except ImportError:
     is_precompressed = None
 
 __all__ = [
+    "KGCCompressor",
+    "Law9Error",
     "E8Compressor",
     "CompressionMode",
     "E8GeometricCodec",

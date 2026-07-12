@@ -1,490 +1,345 @@
 """
-Leech Lattice (Λ24) for E8ZIP
+Leech Lattice (Λ24) - Exact Nearest-Point Quantizer via Golay Construction A
 
-The Leech lattice is the unique even unimodular lattice in 24 dimensions
-with no vectors of squared length 2. It provides optimal sphere packing in 24D.
+This replaces the old approximate/slow implementation with the exact
+Conway-Sloane soft-decision decoder ported from the Glass Network KMind
+(packages/kmind/leech.py, glass_windows branch), extended with the index
+decomposition that makes the quantizer *codeable*:
 
-Properties:
-- Dimension: 24
-- Kissing number: 196,560 (vs E8's 240)
-- Minimal vector length: 2 (squared length 4)
-- Automorphism group: Conway group Co₀
-- Contains 3 copies of E8 lattice
+    Every Leech point (scaled by sqrt(8)) is an integer vector
+        y = 2*g + i*1 + 4*z
+    with g one of the 4096 Golay codewords, i in {0,1} the coset case,
+    and z in Z^24 the translation. (g_idx, i, z) is a bijective index
+    of the lattice point -- 12 bits + 1 bit + small integers -- which is
+    exactly what the range coder consumes. This also repairs the arity
+    mismatch in the KMind's turbo_leech_packer (which expected this
+    decomposition but the decoder never returned it).
 
-Why Leech > E8 for compression:
-- 818× more nearest neighbors (196,560 vs 240)
-- Finer quantization grid in high dimensions
-- Better representation of complex structures
-- 3× more dimensions = more information per vector
-
-Construction:
-Uses the extended binary Golay code [24, 12, 8] for the lattice structure.
+Why Leech: densest lattice packing in 24 dimensions, kissing number
+196560, coding gain 1.04 dB over scalar quantization (~0.173 bits/dim
+saved at fixed distortion). Theta series Theta = E_12 - (65520/691)*Delta.
 
 Based on:
 - Conway & Sloane: "Sphere Packings, Lattices and Groups"
-- Cycle 85, 116 implementations in Kaleidoscope
+- Glass Network KMind leech.py / golay.py (glass_windows)
 """
 
-import numpy as np
-from typing import List, Tuple, Dict, Optional, Any
 from dataclasses import dataclass
-import itertools
-import hashlib
+from functools import lru_cache
+from typing import List, Optional, Sequence, Tuple
+
+import numpy as np
+
+from e8zip.core.golay import all_codewords, decode_24, encode_12_to_24
+
+SQRT8 = 2.8284271247461903
+
+# Leech theta-series coefficients: number of lattice points of norm 2n.
+# Theta_Lambda = E_12 - (65520/691) * Delta  (integrality <=> Ramanujan's
+# tau(n) == sigma_11(n) mod 691). The shell populations are the natural
+# maximum-entropy prior for shell-indexed entropy coding.
+THETA_SERIES = (1, 0, 196560, 16773120, 398034000, 4629381120)
 
 
 @dataclass
 class LeechQuantization:
-    """Result of quantizing to the Leech lattice."""
+    """Result of Leech quantization with full codeable index."""
 
-    point_id: str
     lattice_point: np.ndarray
-    distance: float
-    layer_projections: Dict[str, np.ndarray]  # Quantum, Geometry, Resonance
+    index: int  # 12-bit Golay message index
+    case: int  # coset case i in {0, 1}
+    z: np.ndarray  # integer translation vector (24,)
+    shell: int
+    error: float
 
 
-class GolayCode24:
+@lru_cache(maxsize=1)
+def _codewords_np() -> np.ndarray:
+    return all_codewords()  # (4096, 24) int32; row index == message
+
+
+def batch_nearest_leech_point(
+    v: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Extended Binary Golay Code [24, 12, 8].
+    Vectorized exact nearest-Leech-point projection.
 
-    A perfect binary code with:
-    - Length: 24
-    - Dimension: 12 (2^12 = 4096 codewords)
-    - Minimum distance: 8
+    Args:
+        v: (N, 24) array in standard Leech coordinates.
 
-    Used to construct the Leech lattice.
+    Returns:
+        points (N, 24), shells (N,), distances (N,)
     """
+    N = v.shape[0]
+    if v.shape[1] != 24:
+        raise ValueError("Leech vectors must have 24 dimensions")
 
-    def __init__(self):
-        self.basis = self._generate_basis()
-        self._codewords = None  # Lazy generation
+    y = v * SQRT8
+    golay = _codewords_np()  # (4096, 24)
 
-    def _generate_basis(self) -> np.ndarray:
-        """
-        Generate generator matrix G = [I_12 | A].
-        """
-        I = np.eye(12, dtype=np.int8)
-        A = np.zeros((12, 12), dtype=np.int8)
+    best_dist = np.full(N, np.inf, dtype=np.float64)
+    best_c = np.zeros((N, 24), dtype=np.float64)
 
-        # Standard construction from coding theory
-        A[0, :] = 1
-        A[:, 0] = 1
-        A[0, 0] = 0
+    for case in (0, 1):
+        m0 = case
+        m1 = (2 + case) % 4
 
-        # Circulant 11x11 block from '11011100010'
-        seed = [1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0]
-        for i in range(11):
-            A[i + 1, 1:] = np.roll(seed, i)
+        # Nearest integer congruent to m mod 4, per coordinate
+        c0 = 4 * np.round((y - m0) / 4) + m0
+        c1 = 4 * np.round((y - m1) / 4) + m1
 
-        G = np.hstack((I, A))
-        return G
+        d0 = (y - c0) ** 2
+        d1 = (y - c1) ** 2
 
-    @property
-    def codewords(self) -> np.ndarray:
-        """Lazily generate all 4096 codewords."""
-        if self._codewords is None:
-            inputs = np.array(list(itertools.product([0, 1], repeat=12)), dtype=np.int8)
-            self._codewords = (inputs @ self.basis) % 2
-        return self._codewords
+        # Next-nearest candidates (one step of 4 toward the value)
+        sign0 = np.where(y >= c0, 1.0, -1.0)
+        c0_next = c0 + 4 * sign0
+        p0 = (y - c0_next) ** 2 - d0
 
-    def nearest_codeword(self, vector: np.ndarray) -> Tuple[np.ndarray, int]:
-        """
-        Find nearest codeword using syndrome decoding.
+        sign1 = np.where(y >= c1, 1.0, -1.0)
+        c1_next = c1 + 4 * sign1
+        p1 = (y - c1_next) ** 2 - d1
 
-        Returns:
-            (codeword, hamming_distance)
-        """
-        # Convert to binary
-        binary = (vector > 0.5).astype(np.int8)
+        expected_mod = 0 if case == 0 else 4
 
-        # Brute force nearest (can be optimized with syndrome tables)
-        min_dist = 25
-        nearest = self.codewords[0]
+        dist_base = d0.sum(axis=1)  # (N,)
+        dist_diff = d1 - d0  # (N, 24)
 
-        for cw in self.codewords:
-            dist = np.sum(binary != cw)
-            if dist < min_dist:
-                min_dist = dist
-                nearest = cw
-                if dist == 0:
-                    break
+        c_base = c0.sum(axis=1)  # (N,)
+        c_diff = c1 - c0  # (N, 24)
 
-        return nearest, min_dist
+        dist_k = dist_base[:, None] + dist_diff @ golay.T  # (N, 4096)
+        c_sum_k = c_base[:, None] + c_diff @ golay.T  # (N, 4096)
+        parity_match = (c_sum_k % 8) == expected_mod
+
+        # (chunk, 4096, 24) float64 intermediate: 512 rows ~= 400 MB peak
+        chunk_size = 512
+        for i_start in range(0, N, chunk_size):
+            i_end = min(N, i_start + chunk_size)
+
+            p0_chunk = p0[i_start:i_end, None, :]  # (C, 1, 24)
+            p1_chunk = p1[i_start:i_end, None, :]
+            g_exp = golay[None, :, :]  # (1, 4096, 24)
+
+            p_chunk = np.where(g_exp == 0, p0_chunk, p1_chunk)
+            min_p_k = p_chunk.min(axis=2)  # (C, 4096)
+            best_i_k = p_chunk.argmin(axis=2)  # (C, 4096)
+
+            dist_k_chunk = dist_k[i_start:i_end]
+            parity_chunk = parity_match[i_start:i_end]
+
+            dist_final = np.where(parity_chunk, dist_k_chunk, dist_k_chunk + min_p_k)
+
+            best_k = dist_final.argmin(axis=1)  # (C,)
+            rows = np.arange(i_end - i_start)
+            best_dist_case = dist_final[rows, best_k]
+
+            improved = best_dist_case < best_dist[i_start:i_end]
+            if not np.any(improved):
+                continue
+
+            best_dist[i_start:i_end][improved] = best_dist_case[improved]
+
+            k_improved = best_k[improved]
+            g_best = golay[k_improved]  # (M, 24)
+
+            c0_imp = c0[i_start:i_end][improved]
+            c1_imp = c1[i_start:i_end][improved]
+            c_k = np.where(g_best == 0, c0_imp, c1_imp)
+
+            parity_best = parity_chunk[rows, best_k][improved]
+            needs_fix = ~parity_best
+            if np.any(needs_fix):
+                fix_i = best_i_k[rows, best_k][improved][needs_fix]
+                c0n = c0_next[i_start:i_end][improved][needs_fix]
+                c1n = c1_next[i_start:i_end][improved][needs_fix]
+                g_fix = g_best[needs_fix]
+                c_next_k = np.where(g_fix == 0, c0n, c1n)
+                fi = np.arange(len(fix_i))
+                c_k[np.where(needs_fix)[0], fix_i] = c_next_k[fi, fix_i]
+
+            best_c[i_start:i_end][improved] = c_k
+
+    points = best_c / SQRT8
+    squared_norms = np.sum(points**2, axis=1)
+    shells = np.round(squared_norms / 2.0).astype(np.int32)
+    distances = np.sqrt(np.sum((v - points) ** 2, axis=1))
+
+    return points, shells, distances
+
+
+def nearest_leech_point(
+    v: Sequence[float],
+) -> Tuple[Tuple[float, ...], int, float]:
+    """Single-vector convenience wrapper. Returns (point, shell, distance)."""
+    arr = np.asarray(v, dtype=np.float64).reshape(1, 24)
+    points, shells, distances = batch_nearest_leech_point(arr)
+    return tuple(points[0].tolist()), int(shells[0]), float(distances[0])
+
+
+def leech_index_decompose(
+    points: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Decompose Leech points into codeable indices: y = 2g + i*1 + 4z.
+
+    Args:
+        points: (N, 24) Leech points in standard coordinates.
+
+    Returns:
+        g_idx (N,) int64  - 12-bit Golay message indices
+        case  (N,) int64  - coset case i in {0, 1}
+        z     (N, 24) int64 - integer translations
+    """
+    y = np.rint(points * SQRT8).astype(np.int64)  # integral by construction
+    # sum(y) = 4i (mod 8) determines the case
+    case = ((y.sum(axis=1) % 8) // 4).astype(np.int64)
+    # g = ((y - i) / 2) mod 2 must be a Golay codeword
+    g_bits = (((y - case[:, None]) // 2) % 2).astype(np.int64)
+    # systematic code: message = low 12 bits of the codeword
+    powers = 1 << np.arange(12, dtype=np.int64)
+    g_idx = (g_bits[:, :12] * powers).sum(axis=1)
+    # z = (y - 2g - i) / 4
+    z4 = y - 2 * g_bits - case[:, None]
+    if not np.all(z4 % 4 == 0):
+        raise ValueError("invalid Leech point: index decomposition failed")
+    z = z4 // 4
+    return g_idx, case, z
+
+
+def leech_index_reconstruct(
+    g_idx: np.ndarray, case: np.ndarray, z: np.ndarray
+) -> np.ndarray:
+    """Inverse of leech_index_decompose: (g_idx, i, z) -> points (N, 24)."""
+    golay = _codewords_np()  # row index == message
+    g_bits = golay[np.asarray(g_idx, dtype=np.int64)]  # (N, 24)
+    y = (
+        2 * g_bits
+        + np.asarray(case, dtype=np.int64)[:, None]
+        + 4 * np.asarray(z, dtype=np.int64)
+    )
+    return y.astype(np.float64) / SQRT8
 
 
 class LeechLattice:
     """
-    The Leech Lattice Λ₂₄ - Optimal 24-dimensional lattice.
+    The Leech lattice for geometric compression (exact decoder).
 
-    Features:
-    - 196,560 kissing number (nearest neighbors)
-    - No roots (vectors of length √2)
-    - Connected to Monster group via Moonshine
-    - Contains 3 E8 sublattices
+    Backward-compatible surface for E8Compressor plus the new exact
+    quantization and index-codec paths.
     """
 
-    DIMENSION = 24
-    KISSING_NUMBER = 196560
-    MINIMAL_NORM = 4  # Squared length of minimal vectors
-
-    # Three E8 subspaces within Leech
-    E8_SUBSPACES = {
-        "quantum": (0, 8),  # Dimensions 0-7
-        "geometry": (8, 16),  # Dimensions 8-15
-        "resonance": (16, 24),  # Dimensions 16-23
-    }
-
-    def __init__(self, cache_minimal: int = 2000):
-        """
-        Initialize Leech Lattice.
-
-        Args:
-            cache_minimal: Number of minimal vectors to pre-generate
-        """
-        self.golay = GolayCode24()
-        self.scale = 1.0 / np.sqrt(8)  # For unimodularity
-
-        # Cache some minimal vectors for quantization
-        self._minimal_vectors = self._generate_minimal_vectors(cache_minimal)
-
-    def _generate_minimal_vectors(self, count: int = 2000) -> np.ndarray:
-        """
-        Generate sample minimal vectors of norm 4.
-
-        There are 196,560 in total, but we sample for efficiency.
-        """
-        vectors = []
-
-        # Type A: Coordinate permutations of (±2, 0^23)
-        for i in range(24):
-            v = np.zeros(24)
-            v[i] = 2.0
-            vectors.append(v.copy())
-            v[i] = -2.0
-            vectors.append(v.copy())
-
-        # Type B: (±1^24) with even number of minus signs
-        # Systematic sampling
-        np.random.seed(42)
-        for _ in range(min(500, count // 3)):
-            v = np.ones(24)
-            n_flip = 2 * np.random.randint(0, 13)  # Even number
-            flip_idx = np.random.choice(24, n_flip, replace=False)
-            v[flip_idx] = -1
-            # Normalize to have correct norm
-            vectors.append(v.copy())
-
-        # Type C: (±3, ±1^23) patterns
-        for _ in range(min(500, count // 3)):
-            v = np.random.choice([-1, 1], size=24).astype(float)
-            big_idx = np.random.randint(24)
-            v[big_idx] *= 3
-            vectors.append(v.copy())
-
-        # Additional random samples on the sphere of radius 2
-        for _ in range(count - len(vectors)):
-            v = np.random.randn(24)
-            v = v / np.linalg.norm(v) * 2
-            vectors.append(v)
-
-        return np.array(vectors[:count])
+    def __init__(self, cache_minimal: int = 0):
+        # cache_minimal kept for API compatibility; the exact decoder
+        # needs no sampled minimal-vector cache.
+        pass
 
     def nearest_lattice_point(self, vector: np.ndarray) -> LeechQuantization:
-        """
-        Find the nearest Leech lattice point to a given vector.
-
-        Uses a combination of:
-        1. Golay code decoding
-        2. Nearest minimal vector search
-        3. Integer rounding with parity constraints
-
-        Args:
-            vector: 24D input vector
-
-        Returns:
-            LeechQuantization result
-        """
+        """Exact nearest Leech point with full index decomposition."""
         vector = self._ensure_24d(vector)
-
-        # Sanitize
-        vector = np.nan_to_num(vector, nan=0.0, posinf=1e6, neginf=-1e6)
-
-        # Strategy: Find nearest among cached minimal vectors
-        # (Full decoding is complex - this is an approximation)
-
-        best_point = None
-        best_dist = float("inf")
-
-        # Check minimal vectors
-        for mv in self._minimal_vectors:
-            # Check both the minimal vector and shifted versions
-            for offset in [np.zeros(24), mv]:
-                shifted = vector - offset
-                rounded = np.rint(shifted)
-
-                # Enforce Leech parity constraint
-                if int(rounded.sum()) % 4 != 0:
-                    # Adjust one coordinate
-                    j = int(np.argmax(np.abs(shifted - rounded)))
-                    rounded[j] += np.sign(shifted[j] - rounded[j])
-
-                point = rounded + offset
-                dist = np.sum((vector - point) ** 2)
-
-                if dist < best_dist:
-                    best_dist = dist
-                    best_point = point
-
-        # Also try simple rounding with constraints
-        for coset in [0, 0.5]:
-            shifted = vector - coset
-            rounded = np.rint(shifted)
-
-            # Parity constraint
-            total = int(rounded.sum())
-            if total % 4 != 0:
-                j = int(np.argmax(np.abs(shifted - rounded)))
-                rounded[j] += 1 if (4 - (total % 4)) < 3 else -1
-
-            point = rounded + coset
-            dist = np.sum((vector - point) ** 2)
-
-            if dist < best_dist:
-                best_dist = dist
-                best_point = point
-
-        # Generate point ID
-        point_id = self._hash_point(best_point)
-
-        # Project to E8 subspaces
-        projections = {
-            name: best_point[start:end] for name, (start, end) in self.E8_SUBSPACES.items()
-        }
-
+        points, shells, distances = batch_nearest_leech_point(vector.reshape(1, 24))
+        g_idx, case, z = leech_index_decompose(points)
         return LeechQuantization(
-            point_id=point_id,
-            lattice_point=best_point,
-            distance=np.sqrt(best_dist),
-            layer_projections=projections,
+            lattice_point=points[0],
+            index=int(g_idx[0]),
+            case=int(case[0]),
+            z=z[0],
+            shell=int(shells[0]),
+            error=float(distances[0]),
         )
 
-    def _ensure_24d(self, vector: np.ndarray) -> np.ndarray:
-        """Ensure vector is 24-dimensional."""
-        if len(vector) == 24:
-            return vector.astype(float)
-        elif len(vector) < 24:
-            padded = np.zeros(24)
-            padded[: len(vector)] = vector
-            return padded
-        else:
-            return vector[:24].astype(float)
+    def batch_quantize(
+        self, vectors: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Exact batch quantization with index decomposition.
 
-    def _hash_point(self, point: np.ndarray) -> str:
-        """Generate unique ID for a lattice point."""
-        # Use first few bytes of SHA256
-        data = point.tobytes()
-        return hashlib.sha256(data).hexdigest()[:16]
+        Returns:
+            points (N,24), g_idx (N,), case (N,), z (N,24), distances (N,)
+        """
+        vectors = np.asarray(vectors, dtype=np.float64)
+        points, _, distances = batch_nearest_leech_point(vectors)
+        g_idx, case, z = leech_index_decompose(points)
+        return points, g_idx, case, z, distances
+
+    def _ensure_24d(self, vector: np.ndarray) -> np.ndarray:
+        vector = np.asarray(vector, dtype=np.float64).ravel()
+        if len(vector) == 24:
+            return vector
+        result = np.zeros(24)
+        n = min(len(vector), 24)
+        result[:n] = vector[:n]
+        return result
 
     def project_to_e8(self, vector: np.ndarray, layer: str) -> np.ndarray:
-        """Project 24D vector to one E8 subspace."""
+        """Extract one of three 8D layers from a 24D vector."""
         vector = self._ensure_24d(vector)
-        start, end = self.E8_SUBSPACES[layer]
-        return vector[start:end]
+        idx = {"first": 0, "second": 1, "third": 2}.get(layer, 0)
+        return vector[idx * 8 : (idx + 1) * 8]
 
     def embed_from_e8(self, e8_vector: np.ndarray, layer: str) -> np.ndarray:
-        """Embed 8D E8 vector into 24D Leech space."""
+        """Embed an 8D vector into one layer of a 24D vector."""
         result = np.zeros(24)
-        start, end = self.E8_SUBSPACES[layer]
-        result[start:end] = e8_vector[:8]
+        idx = {"first": 0, "second": 1, "third": 2}.get(layer, 0)
+        result[idx * 8 : (idx + 1) * 8] = np.asarray(e8_vector).ravel()[:8]
         return result
 
     def combine_e8_layers(
-        self, quantum: np.ndarray, geometry: np.ndarray, resonance: np.ndarray
+        self, v1: np.ndarray, v2: np.ndarray, v3: np.ndarray
     ) -> np.ndarray:
-        """Combine three E8 vectors into a Leech vector."""
-        result = np.zeros(24)
-        result[0:8] = quantum[:8] if len(quantum) >= 8 else np.pad(quantum, (0, 8 - len(quantum)))
-        result[8:16] = (
-            geometry[:8] if len(geometry) >= 8 else np.pad(geometry, (0, 8 - len(geometry)))
-        )
-        result[16:24] = (
-            resonance[:8] if len(resonance) >= 8 else np.pad(resonance, (0, 8 - len(resonance)))
-        )
-        return result
+        """Combine three 8D vectors into one 24D vector."""
+        out = np.zeros(24)
+        out[0:8] = np.asarray(v1).ravel()[:8]
+        out[8:16] = np.asarray(v2).ravel()[:8]
+        out[16:24] = np.asarray(v3).ravel()[:8]
+        return out
 
     def theta_series_coefficient(self, n: int) -> int:
-        """
-        Get coefficient of q^(n/2) in theta series.
-
-        Θ(q) = 1 + 196560q² + 16773120q⁴ + ...
-        """
-        coefficients = {
-            0: 1,
-            2: 196560,
-            4: 16773120,
-            6: 398034000,
-            8: 4629381120,
-        }
-        return coefficients.get(n, 0)
+        """Number of Leech lattice points of norm 2n."""
+        if 0 <= n < len(THETA_SERIES):
+            return THETA_SERIES[n]
+        raise ValueError(f"theta coefficient {n} not tabulated")
 
 
 class LeechCodec:
-    """
-    High-level codec using Leech lattice quantization.
+    """Codec wrapper: quantize vectors, heal corrupted coset indices."""
 
-    Features:
-    - 3× more dimensions than E8 (24 vs 8)
-    - Much finer quantization grid
-    - Three-layer semantic structure
-    """
-
-    def __init__(self):
+    def __init__(self) -> None:
         self.lattice = LeechLattice()
-        self._quantization_cache = {}
 
     def quantize(self, vector: np.ndarray) -> LeechQuantization:
-        """Quantize vector to nearest Leech point."""
         return self.lattice.nearest_lattice_point(vector)
 
     def quantize_batch(self, vectors: List[np.ndarray]) -> List[LeechQuantization]:
-        """Quantize multiple vectors."""
-        return [self.quantize(v) for v in vectors]
+        arr = np.array([self.lattice._ensure_24d(v) for v in vectors])
+        points, g_idx, case, z, distances = self.lattice.batch_quantize(arr)
+        shells = np.round(np.sum(points**2, axis=1) / 2.0).astype(np.int32)
+        return [
+            LeechQuantization(
+                lattice_point=points[i],
+                index=int(g_idx[i]),
+                case=int(case[i]),
+                z=z[i],
+                shell=int(shells[i]),
+                error=float(distances[i]),
+            )
+            for i in range(len(vectors))
+        ]
 
-    def encode_bytes(self, data: bytes, chunk_size: int = 192) -> List[LeechQuantization]:
+    @staticmethod
+    def heal_index(corrupted_codeword: int) -> Optional[int]:
         """
-        Encode bytes as Leech lattice points.
+        Error-correct a corrupted 24-bit Golay coset label.
 
-        Args:
-            data: Input bytes
-            chunk_size: Bytes per 24D vector (192 = 24 * 8)
-
-        Returns:
-            List of quantization results
+        Up to 3 flipped bits are healed (returns the 12-bit message);
+        4+ errors are detected and None is returned. This is the
+        self-repair property the Glass Network uses to seal memory
+        boundaries, applied to archive integrity.
         """
-        results = []
+        decoded = decode_24(corrupted_codeword)
+        return None if decoded is None else decoded[1]
 
-        # Pad data
-        padded_len = ((len(data) + chunk_size - 1) // chunk_size) * chunk_size
-        padded = data + bytes(padded_len - len(data))
-
-        for i in range(0, len(padded), chunk_size):
-            chunk = padded[i : i + chunk_size]
-
-            # Convert to 24 floats
-            values = np.frombuffer(chunk, dtype=np.float64).copy()
-            if len(values) < 24:
-                values = np.pad(values, (0, 24 - len(values)))
-            elif len(values) > 24:
-                values = values[:24]
-
-            # Sanitize
-            values = np.nan_to_num(values, nan=0.0, posinf=1e6, neginf=-1e6)
-
-            result = self.quantize(values)
-            results.append(result)
-
-        return results
-
-    def semantic_encode(
-        self, quantum_data: bytes, geometry_data: bytes, resonance_data: bytes
-    ) -> LeechQuantization:
-        """
-        Encode three semantic streams into one Leech vector.
-
-        This leverages the 3-copy E8 structure within Leech.
-
-        Args:
-            quantum_data: Data for quantum layer (dims 0-7)
-            geometry_data: Data for geometry layer (dims 8-15)
-            resonance_data: Data for resonance layer (dims 16-23)
-
-        Returns:
-            Combined Leech quantization
-        """
-
-        def bytes_to_e8(data: bytes) -> np.ndarray:
-            if len(data) < 64:
-                data = data + bytes(64 - len(data))
-            values = np.frombuffer(data[:64], dtype=np.float64).copy()
-            return np.nan_to_num(values[:8], nan=0.0, posinf=1e6, neginf=-1e6)
-
-        q = bytes_to_e8(quantum_data)
-        g = bytes_to_e8(geometry_data)
-        r = bytes_to_e8(resonance_data)
-
-        combined = self.lattice.combine_e8_layers(q, g, r)
-        return self.quantize(combined)
-
-
-# ============================================================
-# DEMO
-# ============================================================
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("LEECH LATTICE (Λ₂₄) DEMO")
-    print("24D Optimal Sphere Packing for Compression")
-    print("=" * 60)
-
-    # Initialize
-    print("\n1. Leech Lattice Properties")
-    leech = LeechLattice()
-    print(f"   Dimension: {LeechLattice.DIMENSION}")
-    print(f"   Kissing number: {LeechLattice.KISSING_NUMBER:,}")
-    print(f"   Cached minimal vectors: {len(leech._minimal_vectors)}")
-    print(f"   E8 subspaces: {list(LeechLattice.E8_SUBSPACES.keys())}")
-
-    # Theta series
-    print("\n   Theta series coefficients:")
-    for n in [0, 2, 4, 6, 8]:
-        print(f"   q^{n}: {leech.theta_series_coefficient(n):,}")
-
-    # Quantization test
-    print("\n2. Quantization Test")
-    np.random.seed(42)
-    test_vector = np.random.randn(24) * 5
-
-    result = leech.nearest_lattice_point(test_vector)
-    print(f"   Input:    {test_vector[:6]}...")
-    print(f"   Nearest:  {result.lattice_point[:6]}...")
-    print(f"   Distance: {result.distance:.4f}")
-    print(f"   Point ID: {result.point_id}")
-
-    # Layer projections
-    print("\n   Layer Projections:")
-    for name, proj in result.layer_projections.items():
-        print(f"   {name:12s}: {proj[:4]}...")
-
-    # Codec test
-    print("\n3. Leech Codec Test")
-    codec = LeechCodec()
-
-    test_data = b"The Leech lattice has 196,560 nearest neighbors!"
-    encoded = codec.encode_bytes(test_data)
-    print(f"   Input: {len(test_data)} bytes")
-    print(f"   Encoded: {len(encoded)} Leech points")
-    print(f"   Bits per point: {len(encoded[0].point_id) * 4}")
-
-    # Semantic encoding
-    print("\n4. Semantic Three-Layer Encoding")
-    quantum = b"wave function"
-    geometry = b"lattice structure"
-    resonance = b"harmonic vibration"
-
-    semantic = codec.semantic_encode(quantum, geometry, resonance)
-    print(f"   Quantum:   '{quantum.decode()}'")
-    print(f"   Geometry:  '{geometry.decode()}'")
-    print(f"   Resonance: '{resonance.decode()}'")
-    print(f"   Combined ID: {semantic.point_id}")
-
-    # Compare with E8
-    print("\n5. Leech vs E8 Comparison")
-    print(f"   {'Metric':<25} {'E8':>15} {'Leech':>15}")
-    print(f"   {'-' * 25} {'-' * 15} {'-' * 15}")
-    print(f"   {'Dimension':<25} {'8':>15} {'24':>15}")
-    print(f"   {'Kissing number':<25} {'240':>15} {'196,560':>15}")
-    print(f"   {'Minimal norm':<25} {'2':>15} {'4':>15}")
-    print(f"   {'Density advantage':<25} {'1x':>15} {'~818x':>15}")
-
-    print("\n" + "=" * 60)
-    print("LEECH LATTICE COMPLETE")
-    print("=" * 60)
+    @staticmethod
+    def index_to_codeword(g_idx: int) -> int:
+        """Expand a 12-bit message to its protective 24-bit codeword."""
+        return encode_12_to_24(g_idx)

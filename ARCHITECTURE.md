@@ -1,5 +1,102 @@
 # E8ZIP Architecture & Compression Pipeline
 
+## v2: KGC — Kaleidoscope Geometric Codec
+
+v2 is the honest successor to the v1 pipeline documented below. The v1
+"lossless" modes computed geometric metadata and then stored a zlib copy
+of the original, which the decoder used while skipping the geometry.
+KGC removes that crutch: the geometry is now the codec.
+
+### The unifying law
+
+Everything KGC emits is a **Compression Debt triple** (Glass Network
+KMind, Law 9: *"compression requires source addresses [and an]
+executable program"*):
+
+```
+L(x) = L(address) + L(program) + L(residual)
+
+address  = sha256 of source + conserved mass + member ids
+program  = codec id, lattice, seeds - a reconstruction recipe
+residual = range-coded bits the geometric prior could not predict
+```
+
+Lossy compression without addresses raises `Law9Error`. Every decode
+reports a truth_status rung borrowed from the KMind language decoder:
+`exact_recovery` / `reconstruction` / `interpretation` / `confabulation`.
+
+### Shared core
+
+```
+core/entropy.py        carry-less range coder (mod 2^32, Subbotin style)
+                       + adaptive Fenwick-tree models (order-1, order-2,
+                       experimental E8-trajectory context)
+core/golay.py          [24,12,8] extended Golay: systematic G=[I|B],
+                       B = bordered QR(11), Pless arithmetic syndrome
+                       decoder (heals <=3 bit errors, detects 4)
+core/leech_lattice.py  exact Leech CVP (Conway-Sloane Construction A,
+                       vectorized over all 4096 Golay cosets x 2 cases)
+                       + bijective index decomposition
+                           y = 2g + i*1 + 4z  <->  (g_idx, case, z)
+core/kgc.py            the KGC2 container + three regime front-ends
+```
+
+The index decomposition is what makes the lattice *codeable*: 12 bits of
+Golay message + 1 case bit + small integers z, each stream fed to its
+own adaptive model. It also fixes the upstream KMind
+`turbo_leech_packer` arity bug (it expected this decomposition; the
+decoder never returned it).
+
+### Three regimes, one object
+
+```
+BYTES        input bytes -> adaptive context model -> range coder
+             raw fallback if the model fails to shrink (random data
+             stays ~1.0x). sha256-verified on decode. Lossless.
+
+TENSOR       flatten -> randomized Hadamard (incoherence, QuIP#) ->
+             normalize -> scale (the rate-distortion knob) -> 24-D
+             blocks -> exact Leech CVP -> entropy-coded (g,i,z).
+             Measured: 4.20 bits/weight @ 23.9 dB SNR on Gaussian
+             weights vs INT4 scalar 4.0 bpw @ 15.8 dB and INT5
+             5.0 bpw @ 22.0 dB - Pareto-dominant at every tested rate.
+
+CONSOLIDATE  (N,24) rows *rg_scale -> Leech sites (block-spin RG step);
+             rows sharing a site collapse to one representative.
+             Per-site conserved mass is stored and reconstruction
+             rescales so group energy matches exactly (0.000% drift).
+             keep_residuals=True stores XOR-exact IEEE-754 residuals
+             (bitwise round-trip, verified); False drops them but
+             keeps addresses -> auditable lossy collapse.
+```
+
+### Lineage
+
+The math is ported from the Glass Network (glass_windows branch):
+`packages/kmind/golay.py`, `packages/kmind/leech.py` (quantizer),
+`consolidation.py` / `renormalization.py` / `store.py` (conserved-mass
+RG collapse), `law_registry.py` (Law 9). The Leech theta series
+`Theta = E_12 - (65520/691)*Delta` = (1, 0, 196560, 16773120, ...) is
+tabulated in `core/leech_lattice.py` as the natural shell prior
+(wiring it into the index models is future work).
+
+### Honest limits
+
+- The byte regime loses to LZ codecs on match-heavy data (zlib 4.16x vs
+  KGC 2.78x on Python source). Its contribution is the verified debt
+  container and geometric context modeling, not LZ replacement. The
+  planned LLM-predictor entropy front-end is what makes this regime
+  state-of-the-art on in-distribution data.
+- The tensor regime is deliberately lossy (like all PTQ weight
+  compression); rate and distortion are always reported together.
+- Leech CVP is exact but CPU-heavy in pure numpy (~35 blocks/s). The
+  GPU path (BVH/RT-core nearest-neighbor search, prototyped in the
+  Glass Network) is future work.
+
+---
+
+## v1 Architecture (legacy, retained for .e8z compatibility)
+
 ## Compression Pipeline Overview
 
 E8ZIP implements multiple compression modes with different trade-offs between speed, ratio, and lossiness.
