@@ -28,8 +28,18 @@ addresses are refused. Every decode reports its **truth_status** rung:
 | Regime | Input | Method | Result (measured, verified round-trip) |
 |---|---|---|---|
 | **BYTES** | any bytes | adaptive context → range coder, raw fallback | lossless, sha256-verified, never expands random data |
-| **TENSOR** | weights / embeddings | randomized Hadamard → exact Leech VQ → entropy-coded `(g_idx, case, z)` | **4.2 bits/weight @ 23.9 dB** — Pareto-dominates scalar INT4 (4.0 bpw @ 15.8 dB) and INT5 (5.0 bpw @ 22.0 dB) |
+| **TENSOR** | weights / embeddings | randomized Hadamard → exact Leech VQ → entropy-coded `(g_idx, case, z)` | **real weights** (all-MiniLM-L6-v2): **23.85 dB @ 4.34 bpw** — beats the reference Leech-VQ benchmark (19.85 dB @ 4.81 bpw) and scalar INT5 (20.38 dB @ 3.74 bpw) at a comparable rate |
 | **CONSOLIDATE** | row sets (embeddings, KV) | RG collapse to canonical Leech sites, conserved mass, member addresses | up to 8.3× with 0.000 % mass drift; bitwise-exact mode available |
+
+A fourth path, `compress_tensor_progressive` (`core/klc.py`), separates
+each block's magnitude from its direction and stores the direction in
+truncatable refinement layers — decode can stop early for a smaller,
+lower-fidelity result. It is a real, tested capability (byte-exact
+truncation points, strictly monotonic fidelity per layer) that the
+regimes above do not have. **Honestly: on raw rate-distortion it loses**
+to the TENSOR regime above at every rate tested, even after tuning —
+use it when you need progressive/streamable decode, not for the best
+compression ratio. See ARCHITECTURE.md for the measured comparison.
 
 ```python
 from e8zip import KGCCompressor
@@ -41,6 +51,9 @@ data, info = kgc.decompress(blob)              # info["truth_status"] == "exact_
 
 blob = kgc.compress_tensor(W, scale=4.0)       # weights -> ~4 bits/weight lattice VQ
 W2, info = kgc.decompress_tensor(blob)
+
+blob = kgc.compress_tensor_progressive(W)      # weights -> truncatable layers
+W2 = kgc.decompress_tensor_progressive(blob, up_to_layer=0)  # partial fidelity, fewer bytes
 
 blob = kgc.consolidate(rows, rg_scale=0.5,     # (N, 24) rows -> Leech sites
                        keep_residuals=False)   # lossy requires addresses (Law 9)

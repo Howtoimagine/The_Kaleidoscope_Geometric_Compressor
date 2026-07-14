@@ -38,7 +38,15 @@ core/leech_lattice.py  exact Leech CVP (Conway-Sloane Construction A,
                        vectorized over all 4096 Golay cosets x 2 cases)
                        + bijective index decomposition
                            y = 2g + i*1 + 4z  <->  (g_idx, case, z)
-core/kgc.py            the KGC2 container + three regime front-ends
+core/transforms.py     incoherence transforms: randomized Hadamard
+                       (O(n log n), QuIP#) and dense random orthogonal
+                       rotation (O(n^2), stronger decorrelation,
+                       ported from the Glass Network's turbo_leech.py)
+core/kgc.py            the KGC2 container + three regime front-ends,
+                       Golay-protected header (see below)
+core/klc.py            gain/shape progressive lattice codec (KLC),
+                       ported and extended from the Glass Network's
+                       KLC2 - see the honest comparison below
 ```
 
 The index decomposition is what makes the lattice *codeable*: 12 bits of
@@ -47,6 +55,12 @@ own adaptive model. It also fixes the upstream KMind
 `turbo_leech_packer` arity bug (it expected this decomposition; the
 decoder never returned it).
 
+The KGC2 archive header's control block (version/regime/truth/flags) is
+itself a Golay codeword: up to 3 flipped bits anywhere in those fields
+are healed transparently on decode, 4+ are detected and rejected rather
+than silently misparsed. Verified in `tests/test_klc.py::TestHeaderHealing`
+(30/30 random 1-3-bit-flip trials healed).
+
 ### Three regimes, one object
 
 ```
@@ -54,12 +68,9 @@ BYTES        input bytes -> adaptive context model -> range coder
              raw fallback if the model fails to shrink (random data
              stays ~1.0x). sha256-verified on decode. Lossless.
 
-TENSOR       flatten -> randomized Hadamard (incoherence, QuIP#) ->
+TENSOR       flatten -> incoherence transform (Hadamard or rotation) ->
              normalize -> scale (the rate-distortion knob) -> 24-D
              blocks -> exact Leech CVP -> entropy-coded (g,i,z).
-             Measured: 4.20 bits/weight @ 23.9 dB SNR on Gaussian
-             weights vs INT4 scalar 4.0 bpw @ 15.8 dB and INT5
-             5.0 bpw @ 22.0 dB - Pareto-dominant at every tested rate.
 
 CONSOLIDATE  (N,24) rows *rg_scale -> Leech sites (block-spin RG step);
              rows sharing a site collapse to one representative.
@@ -70,10 +81,68 @@ CONSOLIDATE  (N,24) rows *rg_scale -> Leech sites (block-spin RG step);
              keeps addresses -> auditable lossy collapse.
 ```
 
+A fourth path sits alongside TENSOR rather than replacing it:
+
+```
+PROGRESSIVE  (core/klc.py) per-24-D-block gain/shape separation ->
+             exact Leech CVP of the (scaled) unit-direction -> Golay
+             coset base layer -> progressive int8 residual layers,
+             each its own entropy-coded, length-prefixed, truncatable
+             segment. Decode may stop at any layer for a smaller,
+             lower-fidelity result - the flat TENSOR regime cannot do
+             this at all (all-or-nothing).
+```
+
+### Measured on real weights (all-MiniLM-L6-v2, not synthetic)
+
+Every number below is a verified round-trip against actual
+`sentence-transformers/all-MiniLM-L6-v2` weight tensors (fetched via
+`huggingface_hub`), matching the Glass Network's own benchmark
+methodology (`benchmarks/turbo_leech_rate_distortion.py`,
+glass_windows branch) so the comparison is apples-to-apples:
+
+| Method | dB (SNR) | bits/weight |
+|---|---|---|
+| **KGC TENSOR regime** (this repo) | **23.85** | **4.34** |
+| Glass Network reference Leech VQ (no entropy coding of indices) | 19.85 | 4.81 |
+| Scalar INT5 (entropy-coded) | 20.38 | 3.74 |
+| Scalar INT6 (entropy-coded) | 26.71 | 4.76 |
+
+The TENSOR regime beats the Glass Network's own published Leech-VQ
+number outright - more fidelity, fewer bits - which the exact-CVP
+decoder plus real adaptive entropy coding (rather than a marginal-
+entropy estimate) accounts for. It's ahead of INT5 at a comparable
+rate and in the same neighborhood as INT6 while still exposing a
+continuous rate-distortion knob (`scale`) that discrete bit-widths
+don't have.
+
+**PROGRESSIVE (KLC) - an honest negative result.** The working
+hypothesis going in was that separating magnitude from direction
+per-block would *also* win on rate-distortion, on top of adding
+truncatable decode. Measured on the same real tensors, after tuning
+(`shape_scale` 16->48, `gain_k` 32->128 - a real improvement over the
+first guess): **it does not beat TENSOR at any tested rate.**
+
+| Operating point | KGC TENSOR | KLC (tuned) |
+|---|---|---|
+| low rate | 23.91 dB @ 4.57 bpw | 20.31-30.38 dB @ 4.11-6.09 bpw (defaults vs tuned) |
+| matched high rate | 30.93 dB @ 5.85 bpw | 30.38 dB @ 6.09 bpw |
+
+At matched fidelity (~30.4-30.9 dB) TENSOR needs *fewer* bits. KLC's
+real, verified value is the truncatable/progressive property itself
+(byte-exact truncation points, strictly monotonic fidelity per layer -
+`tests/test_klc.py::test_progressive_fidelity_is_monotonic`), not
+compression ratio. Use it for partial-fidelity streaming or bandwidth-
+adaptive serving; use TENSOR for the best ratio. `benchmarks/
+benchmark_real_weights.py` reproduces both tables.
+
 ### Lineage
 
 The math is ported from the Glass Network (glass_windows branch):
 `packages/kmind/golay.py`, `packages/kmind/leech.py` (quantizer),
+`packages/kdot_v2/lattice_codec.py` (KLC2 - gain/shape + progressive
+layers), `packages/kmind/model_cookbook/turbo_leech.py` (dense
+rotation transform, real-weight benchmark harness),
 `consolidation.py` / `renormalization.py` / `store.py` (conserved-mass
 RG collapse), `law_registry.py` (Law 9). The Leech theta series
 `Theta = E_12 - (65520/691)*Delta` = (1, 0, 196560, 16773120, ...) is
@@ -89,6 +158,10 @@ tabulated in `core/leech_lattice.py` as the natural shell prior
   state-of-the-art on in-distribution data.
 - The tensor regime is deliberately lossy (like all PTQ weight
   compression); rate and distortion are always reported together.
+- The progressive codec (KLC) is rate-distortion-dominated by the flat
+  TENSOR regime - see above. Its residual-layer step schedule is a
+  fixed halving sequence (not adaptive to measured residual variance),
+  which is the likely fixable cause; untried in this pass.
 - Leech CVP is exact but CPU-heavy in pure numpy (~35 blocks/s). The
   GPU path (BVH/RT-core nearest-neighbor search, prototyped in the
   Glass Network) is future work.

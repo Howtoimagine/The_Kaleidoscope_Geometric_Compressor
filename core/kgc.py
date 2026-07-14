@@ -49,11 +49,13 @@ from e8zip.core.entropy import (
     RangeDecoder,
     RangeEncoder,
 )
+from e8zip.core.golay import decode_24, encode_12_to_24
 from e8zip.core.leech_lattice import (
     batch_nearest_leech_point,
     leech_index_decompose,
     leech_index_reconstruct,
 )
+from e8zip.core import transforms
 
 MAGIC = b"KGC2"
 VERSION = 2
@@ -112,28 +114,50 @@ def _unpack_stream(data: bytes, offset: int) -> Tuple[bytes, int]:
     return data[offset : offset + n], offset + n
 
 
+def _pack_control(version: int, regime: int, truth: int, flags: int) -> int:
+    """Pack the four control fields into a 12-bit Golay message."""
+    return (
+        (version & 0x7) | ((regime & 0x7) << 3) | ((truth & 0x3) << 6) | ((flags & 0x3) << 8)
+    )
+
+
+def _unpack_control(msg: int) -> Tuple[int, int, int, int]:
+    return msg & 0x7, (msg >> 3) & 0x7, (msg >> 6) & 0x3, (msg >> 8) & 0x3
+
+
 def _header(regime: int, truth: int, debt: DebtRecord) -> bytes:
+    # Control block (version/regime/truth/flags) is Golay-protected: it
+    # decides how the rest of the archive is parsed, so a few flipped
+    # bits here must not brick the whole file. Heals <=3 bit errors.
+    codeword = encode_12_to_24(_pack_control(VERSION, regime, truth, 0))
     return (
         MAGIC
-        + struct.pack("<BBBB", VERSION, regime, truth, 0)
+        + codeword.to_bytes(3, "little")
         + struct.pack("<Q", debt.source_length)
         + debt.source_sha256
         + struct.pack("<dI", debt.conserved_mass, debt.member_count)
     )
 
 
-HEADER_SIZE = 4 + 4 + 8 + 32 + 12
+HEADER_SIZE = 4 + 3 + 8 + 32 + 12
 
 
 def _parse_header(data: bytes) -> Tuple[int, int, DebtRecord, int]:
     if data[:4] != MAGIC:
         raise ValueError("not a KGC2 archive")
-    version, regime, truth, _flags = struct.unpack_from("<BBBB", data, 4)
+    codeword = int.from_bytes(data[4:7], "little")
+    decoded = decode_24(codeword)
+    if decoded is None:
+        raise ValueError(
+            "KGC2 header control block corrupted beyond repair (>=4 bit errors)"
+        )
+    _, msg, _errors_corrected = decoded
+    version, regime, truth, _flags = _unpack_control(msg)
     if version != VERSION:
         raise ValueError(f"unsupported KGC version {version}")
-    (source_length,) = struct.unpack_from("<Q", data, 8)
-    sha = data[16:48]
-    mass, members = struct.unpack_from("<dI", data, 48)
+    (source_length,) = struct.unpack_from("<Q", data, 7)
+    sha = data[15:47]
+    mass, members = struct.unpack_from("<dI", data, 47)
     debt = DebtRecord(sha, source_length, mass, members)
     return regime, truth, debt, HEADER_SIZE
 
@@ -198,29 +222,7 @@ def decompress_bytes(data: bytes) -> Tuple[bytes, Dict[str, Any]]:
 # ======================================================================
 
 
-def _fwht(a: np.ndarray) -> np.ndarray:
-    """In-place fast Walsh-Hadamard transform along axis 1 (power-of-2 dim)."""
-    a = a.copy()
-    h = 1
-    n = a.shape[1]
-    while h < n:
-        for i in range(0, n, h * 2):
-            x = a[:, i : i + h].copy()
-            y = a[:, i + h : i + 2 * h].copy()
-            a[:, i : i + h] = x + y
-            a[:, i + h : i + 2 * h] = x - y
-        h *= 2
-    return a / np.sqrt(n)
-
-
-def _rht(a: np.ndarray, seed: int, inverse: bool = False) -> np.ndarray:
-    """Randomized Hadamard transform (QuIP#-style incoherence pass)."""
-    n = a.shape[1]
-    rng = np.random.default_rng(seed)
-    signs = rng.choice([-1.0, 1.0], size=n)
-    if inverse:
-        return _fwht(a) * signs  # H^-1 = H (orthonormal), undo signs after
-    return _fwht(a * signs)
+TRANSFORM_KINDS = ("hadamard", "rotation", "none")
 
 
 def _zigzag(z: np.ndarray) -> np.ndarray:
@@ -232,19 +234,28 @@ def _unzigzag(u: np.ndarray) -> np.ndarray:
 
 
 def compress_tensor(
-    w: np.ndarray, scale: float = 4.0, hadamard_dim: int = 128, seed: int = 42
+    w: np.ndarray,
+    scale: float = 4.0,
+    hadamard_dim: int = 128,
+    seed: int = 42,
+    transform: str = "hadamard",
 ) -> bytes:
     """
     Lattice-VQ compression of a weight/embedding tensor.
 
-    Pipeline: flatten -> randomized Hadamard (incoherence) -> unit-var
-    normalize -> * scale -> 24-D blocks -> exact Leech CVP -> entropy-
-    coded (g_idx, case, zigzag(z)).
+    Pipeline: flatten -> incoherence transform -> unit-var normalize ->
+    * scale -> 24-D blocks -> exact Leech CVP -> entropy-coded
+    (g_idx, case, zigzag(z)).
 
     `scale` is the rate-distortion knob: higher = more bits, higher SNR.
-    This is deliberately lossy (like every PTQ method); the archive
-    carries the source hash so downstream fidelity is auditable.
+    `transform` selects the incoherence pass ('hadamard': QuIP#-style,
+    O(n log n); 'rotation': dense random orthogonal, O(n^2), stronger
+    decorrelation - see core/transforms.py). This is deliberately lossy
+    (like every PTQ method); the archive carries the source hash so
+    downstream fidelity is auditable.
     """
+    if transform not in TRANSFORM_KINDS:
+        raise ValueError(f"transform must be one of {TRANSFORM_KINDS}")
     w = np.asarray(w, dtype=np.float64)
     orig_shape = w.shape
     flat = w.ravel()
@@ -258,7 +269,7 @@ def compress_tensor(
     pad_h = (-n) % hadamard_dim
     padded = np.concatenate([flat, np.zeros(pad_h)])
     rows = padded.reshape(-1, hadamard_dim)
-    inc = _rht(rows, seed).ravel()
+    inc = transforms.forward(rows, transform, seed).ravel()
 
     sigma = float(np.std(inc)) or 1.0
     x = inc / sigma * scale
@@ -284,8 +295,9 @@ def compress_tensor(
         m_z.encode(enc, int(u))
     coded = enc.finish()
 
+    transform_id = TRANSFORM_KINDS.index(transform)
     params = struct.pack(
-        "<IIddIIB",
+        "<IIddIIBB",
         n,
         len(g_idx),
         sigma,
@@ -293,6 +305,7 @@ def compress_tensor(
         hadamard_dim,
         seed,
         len(orig_shape),
+        transform_id,
     ) + struct.pack(f"<{len(orig_shape)}I", *orig_shape)
     return (
         _header(REGIME_TENSOR, RECONSTRUCTION, debt)
@@ -307,10 +320,11 @@ def decompress_tensor(data: bytes) -> Tuple[np.ndarray, Dict[str, Any]]:
     if regime != REGIME_TENSOR:
         raise ValueError("archive is not tensor-regime")
 
-    n, n_blocks, sigma, scale, hadamard_dim, seed, ndim = struct.unpack_from(
-        "<IIddIIB", data, off
+    n, n_blocks, sigma, scale, hadamard_dim, seed, ndim, transform_id = struct.unpack_from(
+        "<IIddIIBB", data, off
     )
-    off += struct.calcsize("<IIddIIB")
+    transform = TRANSFORM_KINDS[transform_id]
+    off += struct.calcsize("<IIddIIBB")
     shape = struct.unpack_from(f"<{ndim}I", data, off)
     off += 4 * ndim
     (z_alpha,) = struct.unpack_from("<I", data, off)
@@ -339,7 +353,7 @@ def decompress_tensor(data: bytes) -> Tuple[np.ndarray, Dict[str, Any]]:
     pad_h = (-n) % hadamard_dim
     total = n + pad_h
     rows = inc[:total].reshape(-1, hadamard_dim)
-    flat = _rht(rows, seed, inverse=True).ravel()[:n]
+    flat = transforms.inverse(rows, transform, seed).ravel()[:n]
 
     w = flat.reshape(shape).astype(np.float32)
     return w, {
@@ -582,6 +596,35 @@ class KGCCompressor:
 
     def decompress_tensor(self, blob: bytes) -> Tuple[np.ndarray, Dict[str, Any]]:
         return decompress_tensor(blob)
+
+    def compress_tensor_progressive(self, w: np.ndarray, **kw) -> bytes:
+        """
+        Gain/shape progressive lattice encoding (see core/klc.py).
+
+        Separates per-block magnitude from direction before lattice-
+        quantizing, then stores truncatable residual refinement layers.
+        Prefer this over compress_tensor on data with block-to-block
+        magnitude variation (real weight tensors, embeddings) - see
+        benchmarks/benchmark_klc.py for the measured trade-off.
+        """
+        from e8zip.core import klc
+
+        return klc.encode(w, **kw)
+
+    def decompress_tensor_progressive(
+        self, blob: bytes, up_to_layer: Optional[int] = None
+    ) -> np.ndarray:
+        """Decode a compress_tensor_progressive archive, optionally truncated."""
+        from e8zip.core import klc
+
+        return klc.decode(blob, up_to_layer=up_to_layer)
+
+    @staticmethod
+    def tensor_progressive_layer_sizes(blob: bytes) -> Dict[str, int]:
+        """Bytes needed to decode at each progressive truncation point."""
+        from e8zip.core import klc
+
+        return klc.layer_sizes(blob)
 
     def consolidate(self, rows: np.ndarray, **kw) -> bytes:
         return consolidate(rows, **kw)

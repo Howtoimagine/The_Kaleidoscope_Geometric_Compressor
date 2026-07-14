@@ -5,6 +5,54 @@ All notable changes to E8ZIP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-07-14
+
+### Added — more borrowed from the Glass Network (glass_windows branch)
+
+- **Real-weight validation** (`benchmarks/benchmark_real_weights.py`):
+  the TENSOR regime tested against actual `sentence-transformers/
+  all-MiniLM-L6-v2` weights (not synthetic Gaussians), matching the
+  Glass Network's own methodology. Result: **23.85 dB @ 4.34 bits/
+  weight**, beating both the Glass Network's own published Leech-VQ
+  reference (19.85 dB @ 4.81 bpw) and entropy-coded scalar INT5
+  (20.38 dB @ 3.74 bpw) at a comparable rate. This corrects and
+  properly earns the claim v2.0.0's synthetic-Gaussian benchmark made
+  prematurely.
+- **`core/transforms.py`**: incoherence transforms factored out and
+  extended with a dense random-orthogonal rotation (ported from
+  `model_cookbook/turbo_leech.py`) alongside randomized Hadamard, both
+  exposed as a `transform=` option on `compress_tensor`.
+- **`core/klc.py`**: gain/shape progressive lattice codec, ported and
+  extended from the Glass Network's KLC2 (`packages/kdot_v2/
+  lattice_codec.py`). Separates per-block magnitude from direction,
+  uses the exact Leech CVP for the base layer (KLC2 used a cheaper
+  sign-only coset), and entropy-codes every stream including the
+  progressive residual layers (KLC2 stored raw bytes). Exposed as
+  `KGCCompressor.compress_tensor_progressive` /
+  `decompress_tensor_progressive(blob, up_to_layer=...)`.
+  **Honest result**: hypothesized to also win on rate-distortion:
+  it does not. Measured Pareto-dominated by the flat TENSOR regime at
+  every tested rate, even after hyperparameter tuning. Its real,
+  verified value is truncatable/progressive decode (byte-exact
+  truncation points, strictly monotonic per-layer fidelity), a
+  capability the flat regime doesn't have at all - documented as such
+  rather than oversold.
+- **Golay-protected KGC2 header**: the archive control block (version/
+  regime/truth/flags) is now itself a Golay codeword - heals up to 3
+  flipped bits transparently, detects 4+ instead of silently
+  misparsing. 30/30 fault-injection trials healed in testing.
+- 18 new tests (`tests/test_klc.py`): transform exactness/orthogonality,
+  KLC round-trip across shapes, progressive-fidelity monotonicity,
+  gain recovery, zero-block handling, header self-healing. 64 total
+  now pass.
+
+### Fixed
+
+- `core/leech_lattice.py`: `shells` was cast to `int32`, which could
+  silently overflow (undefined cast) for large-magnitude input via the
+  legacy v1 LEECH-mode pathway; widened to `int64` with NaN/Inf
+  sanitization at the `LeechLattice` OO-wrapper boundary.
+
 ## [2.0.0] - 2026-07-12
 
 ### Added — KGC: the Kaleidoscope Geometric Codec

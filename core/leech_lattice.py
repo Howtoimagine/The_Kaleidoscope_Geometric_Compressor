@@ -162,7 +162,12 @@ def batch_nearest_leech_point(
 
     points = best_c / SQRT8
     squared_norms = np.sum(points**2, axis=1)
-    shells = np.round(squared_norms / 2.0).astype(np.int32)
+    # int64: shell = squared_norm/2 can legitimately exceed int32 range
+    # for large-magnitude input (e.g. the legacy v1 LEECH-mode pathway,
+    # which does not pre-scale its vectors the way KGC/KLC do).
+    shells = np.nan_to_num(np.round(squared_norms / 2.0), nan=0.0, posinf=0.0).astype(
+        np.int64
+    )
     distances = np.sqrt(np.sum((v - points) ** 2, axis=1))
 
     return points, shells, distances
@@ -264,6 +269,16 @@ class LeechLattice:
 
     def _ensure_24d(self, vector: np.ndarray) -> np.ndarray:
         vector = np.asarray(vector, dtype=np.float64).ravel()
+        # Sanitize before the exact decoder: batch_nearest_leech_point has
+        # no defensive clipping (it assumes well-scaled input, which every
+        # KGC/KLC caller provides), but this OO wrapper is also the v1
+        # LEECH-mode entry point, which can hand it NaN-sanitized-but-huge
+        # values (core/compressor.py's byte pipeline clips only NaN/Inf,
+        # not magnitude) - unclipped, squared_norms can overflow float64
+        # and produce a NaN->int cast warning downstream. Matches the
+        # nan_to_num/clip(-1e6, 1e6) convention used throughout e8_lattice.py.
+        vector = np.nan_to_num(vector, nan=0.0, posinf=1e6, neginf=-1e6)
+        vector = np.clip(vector, -1e6, 1e6)
         if len(vector) == 24:
             return vector
         result = np.zeros(24)
@@ -313,7 +328,9 @@ class LeechCodec:
     def quantize_batch(self, vectors: List[np.ndarray]) -> List[LeechQuantization]:
         arr = np.array([self.lattice._ensure_24d(v) for v in vectors])
         points, g_idx, case, z, distances = self.lattice.batch_quantize(arr)
-        shells = np.round(np.sum(points**2, axis=1) / 2.0).astype(np.int32)
+        shells = np.nan_to_num(
+            np.round(np.sum(points**2, axis=1) / 2.0), nan=0.0, posinf=0.0
+        ).astype(np.int64)
         return [
             LeechQuantization(
                 lattice_point=points[i],
