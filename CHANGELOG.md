@@ -5,7 +5,7 @@ All notable changes to E8ZIP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.0] - 2026-07-14
+## [2.2.0] - 2026-07-14
 
 ### Added — more borrowed from the Glass Network (glass_windows branch)
 
@@ -52,6 +52,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently overflow (undefined cast) for large-magnitude input via the
   legacy v1 LEECH-mode pathway; widened to `int64` with NaN/Inf
   sanitization at the `LeechLattice` OO-wrapper boundary.
+
+Note: this entry and 2.1.0 below were developed concurrently on the
+same branch by separate sessions; 2.2.0's real-weight benchmark
+(`benchmarks/benchmark_real_weights.py`) supersedes 2.1.0's synthetic-
+Gaussian TENSOR numbers as the reference measurement - see
+ARCHITECTURE.md for the combined, reconciled picture.
+
+## [2.1.0] - 2026-07-12
+
+### Added — theta prior, LLM predictor socket, recall-as-rays
+
+- **Exact Leech theta series** (`core/leech_lattice.py`): `theta_series(n)`
+  computes N(2n) for arbitrary n via Θ = E₁₂ − (65520/691)Δ with the Euler
+  product expanded by the pentagonal number theorem — exact Python
+  integers, verified against the tabulated coefficients. `shell_prior()`
+  turns it into the max-entropy shell distribution
+  P(shell n) ∝ N(2n)·exp(−n/σ²) for a Gaussian source.
+- **Prior-seeded entropy models** (`core/entropy.py`): `AdaptiveModel`
+  accepts an initial `prior`, with a raised rescale ceiling so good
+  priors keep resolution while data can still override them.
+- **Tensor regime priors** (`core/kgc.py`, header flags, backward
+  compatible with 2.0 archives):
+  - `FLAG_Z_PRIOR` (new default): z-translation model seeded with the
+    discretized Gaussian implied by `scale`. Rate improvement measured
+    at every operating point (4.20 → 4.13 bits/weight @ 23.9 dB).
+  - `FLAG_SHELL_PRIOR` (opt-in): shell-indexed coding against the theta
+    prior with shell-conditioned z models. Measured a NET rate loss
+    (~+0.24 bpw at scale 4 — the shell is deterministic given (g,i,z),
+    and conditioning recovers only ~2 of its ~8 bits/block); kept,
+    documented as such, for progressive decode / shell auditing.
+- **Predictor front-end** (`core/predictor.py`): the LLM socket for the
+  BYTES regime. Any deterministic causal model emitting next-byte
+  probabilities drives the range coder (`mode="predictor:<name>"`);
+  archives store only the registry name. Ships `NGramMixPredictor`
+  (dependency-free reference) and `CallablePredictor` (adapter for
+  torch / llama.cpp / ONNX logits functions).
+- **Recall-as-rays prototype** (`core/recall.py`, `docs/RT_RECALL.md`,
+  `benchmarks/benchmark_recall.py`): feasibility study + three-way
+  bake-off for GPU memory recall on NVIDIA RT cores — GEMM brute force,
+  Leech-cell hashing (exact CVP as LSH), and the RT-style
+  multi-projection (24→3) radius-filter + vote + exact re-rank pipeline
+  (CPU reference semantics matching an OptiX BVH/any-hit port).
+  Measured: projection filter reaches recall@10 = 1.00 at r=1.5, votes
+  2/4 on clustered banks; lattice-cell hash trails at 0.58.
+- **GPU recall backends** (`core/recall_gpu.py`, torch/CUDA): exact GEMM
+  brute force and the full RT-style pipeline with every stage on device
+  (grid probe via sorted-cell-key `searchsorted` — the one stage an
+  OptiX port swaps for RT-core BVH traversal). Decision-gate numbers on
+  RTX 3070 Ti at N=10⁶ rows: projection filter 0.119 ms/query at
+  recall@10 = 0.993 vs exact GPU GEMM 0.285 ms/query — the filter beats
+  exact search 2.4x on CUDA cores alone, passing the >2x adoption gate
+  before RT cores are even used.
+- **Online GRU predictor** (`core/predictor.py`, `"gru-online"`):
+  NNCP-style byte-level GRU trained online during BOTH compression and
+  decompression from a fixed seed — no weights in the archive, the
+  learned model is program, not payload. On 8 KB of source code:
+  gru-online 2.68x, ngram-mix 2.87x, order-2 baseline 2.28x (all
+  verified round-trips).
+- **OptiX RT-core recall backend** (`core/rt_optix.py`): the ray-tracing
+  hardware port, built and running. NVRTC-compiled device programs
+  (degenerate rays from each query, a custom origin-in-sphere
+  `__intersection__`, an atomic-append `__anyhit__` that keeps
+  traversing), a GAS of one AABB per stored row per projection, votes +
+  exact 24-D re-rank in CuPy. Bounded-memory query chunking on both GPU
+  backends. Measured on RTX 3070 Ti (full numbers in docs/RT_RECALL.md):
+  at a saturating N=100k/4096-query batch the RT-core path is the fastest
+  method (0.009 ms/query, 25% under exact GEMM) and the only one reaching
+  recall@10 = 1.000; at N=2M the tuned CUDA grid probe is faster on this
+  Ampere card while RT cores still give strictly the best recall. Live
+  install verified: pyoptix 9.1, CuPy 14.1, CUDA 12.9/13.0, OptiX
+  headers, VS2022 Build Tools + Win11 SDK.
+- 29 new falsification-style tests (`tests/test_upgrades.py`), including
+  live OptiX RT-core tests that auto-skip when the stack is absent.
 
 ## [2.0.0] - 2026-07-12
 

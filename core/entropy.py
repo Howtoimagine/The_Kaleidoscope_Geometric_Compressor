@@ -112,12 +112,36 @@ class AdaptiveModel:
     # data close to 8 bits/byte instead of expanding.
     LIMIT = 4096
 
-    def __init__(self, n_symbols: int) -> None:
+    def __init__(self, n_symbols: int, prior: Optional[np.ndarray] = None) -> None:
+        """
+        prior: optional non-negative weights (length n_symbols). They are
+        scaled into initial counts summing to ~LIMIT/2 (each >= 1), so a
+        good prior saves the adaptation warm-up cost while rescaling
+        still lets the data override it.
+        """
         self.n = n_symbols
         self.tree = np.zeros(n_symbols + 1, dtype=np.int64)
         self.total = 0
-        for s in range(n_symbols):  # uniform prior of 1
-            self._add(s, 1)
+        self.limit = self.LIMIT
+        if prior is None:
+            for s in range(n_symbols):  # uniform prior of 1
+                self._add(s, 1)
+        else:
+            p = np.asarray(prior, dtype=np.float64)
+            if p.shape != (n_symbols,) or np.any(p < 0):
+                raise ValueError("prior must be non-negative with length n_symbols")
+            # Prior-seeded models get a higher ceiling: finer prior
+            # resolution, and the data still overrides via rescaling.
+            self.limit = 32768
+            budget = max(self.limit // 2 - n_symbols, 0)
+            total = p.sum()
+            if total > 0:
+                scaled = np.floor(p / total * budget).astype(np.int64)
+            else:
+                scaled = np.zeros(n_symbols, dtype=np.int64)
+            counts = scaled + 1  # every symbol stays codeable
+            for s in range(n_symbols):
+                self._add(s, int(counts[s]))
 
     def _add(self, sym: int, delta: int) -> None:
         i = sym + 1
@@ -152,7 +176,7 @@ class AdaptiveModel:
 
     def update(self, sym: int) -> None:
         self._add(sym, self.INCREMENT)
-        if self.total >= self.LIMIT:
+        if self.total >= self.limit:
             self._rescale()
 
     def _rescale(self) -> None:
