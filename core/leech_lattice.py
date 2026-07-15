@@ -189,14 +189,26 @@ def batch_nearest_leech_point(
         c_base = c0.sum(axis=1)  # (N,)
         c_diff = c1 - c0  # (N, 24)
 
-        dist_k = dist_base[:, None] + dist_diff @ golay.T  # (N, 4096)
-        c_sum_k = c_base[:, None] + c_diff @ golay.T  # (N, 4096)
-        parity_match = (c_sum_k % 8) == expected_mod
-
-        # (chunk, 4096, 24) float64 intermediate: 512 rows ~= 400 MB peak
+        # Every array below this point has an (N, 4096) or (N, 4096, 24)
+        # dimension - dist_k/c_sum_k/parity_match alone are ~5.7 GB EACH
+        # at N=175k (a real 2048x2048 LLM layer), computed simultaneously
+        # if done for the full N up front. This OOM-killed exactly that
+        # layer on a 15 GB box. Chunking from here (not just the old
+        # refinement-only chunk) bounds every (chunk, 4096, ...) array
+        # regardless of chunk_size, so this can go back up from the
+        # OOM-avoidance-era 64 - 64 added ~8x Python/numpy loop overhead
+        # for no remaining memory benefit once dist_k/c_sum_k are chunked.
         chunk_size = 512
         for i_start in range(0, N, chunk_size):
             i_end = min(N, i_start + chunk_size)
+
+            dist_k_chunk = (
+                dist_base[i_start:i_end, None] + dist_diff[i_start:i_end] @ golay.T
+            )  # (C, 4096)
+            c_sum_k_chunk = (
+                c_base[i_start:i_end, None] + c_diff[i_start:i_end] @ golay.T
+            )  # (C, 4096)
+            parity_chunk = (c_sum_k_chunk % 8) == expected_mod
 
             p0_chunk = p0[i_start:i_end, None, :]  # (C, 1, 24)
             p1_chunk = p1[i_start:i_end, None, :]
@@ -205,9 +217,6 @@ def batch_nearest_leech_point(
             p_chunk = np.where(g_exp == 0, p0_chunk, p1_chunk)
             min_p_k = p_chunk.min(axis=2)  # (C, 4096)
             best_i_k = p_chunk.argmin(axis=2)  # (C, 4096)
-
-            dist_k_chunk = dist_k[i_start:i_end]
-            parity_chunk = parity_match[i_start:i_end]
 
             dist_final = np.where(parity_chunk, dist_k_chunk, dist_k_chunk + min_p_k)
 
