@@ -5,6 +5,58 @@ All notable changes to E8ZIP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-07-14
+
+### Added — first real-LLM perplexity measurement (the metric that actually matters)
+
+- **`benchmarks/benchmark_llm_perplexity.py`**: every prior tensor-
+  regime benchmark measured weight-space SNR/MSE - a proxy. This
+  measures WikiText-2 perplexity after actually dequantizing into
+  `Qwen/Qwen3.5-2B-Base` (a real, current hybrid linear/full-attention
+  generative model) and running inference, matching how GPTQ/AWQ
+  papers report results. Honestly scoped to 3 representative Linear
+  layers (12.58M params, 0.92% of the model) - exact Leech CVP is too
+  slow to quantize the full model in reasonable time (see Fixed,
+  below) - with everything else held at fp32.
+  - Own implementation of GPTQ (Frantar et al. 2022 - Hessian-based
+    sequential quantization with error compensation), since
+    `auto-gptq`'s CUDA-era API doesn't import against current
+    `transformers`. Validated against RTN on both weight-space and
+    output-space error before trusting it.
+  - **Result**: fp32 ppl=8.887; RTN-INT4 ppl=9.242 (+0.355); **GPTQ-
+    INT4 ppl=8.922 (+0.035)**; **KGC ppl=8.957 (+0.070, 4.08 bpw)**.
+    KGC beats naive RTN by ~5x on perplexity degradation at the same
+    bit-width, but doesn't yet match GPTQ (~2x further from fp32).
+    Honest answer to "is this a good LLM quantizer": genuinely
+    competitive, not yet state-of-the-art against the specific method
+    it's modeled after.
+
+### Fixed
+
+- `core/leech_lattice.py`: `batch_nearest_leech_point` computed its
+  per-case `dist_k`/`c_sum_k`/`parity_match` arrays for the entire
+  input before any chunking - ~5.7 GB each at N=175k (one real
+  2048x2048 LLM layer), OOM-killing the process outright on a 15 GB
+  box. Fixed by moving the chunk boundary earlier so every (chunk,
+  4096, ...) intermediate is bounded regardless of input size.
+  Verified: full test suite passes, throughput holds steady at
+  ~300-350 blocks/s from N=200 to N=20,000 (no degradation with
+  scale), peak RSS ~1.2 GB.
+- Found (not yet fixed - a deployment consideration, not a bug):
+  measured CVP throughput crashes to ~22 blocks/s (~15x slower) when
+  quantizing real layers inside the same process as a loaded PyTorch
+  model, vs ~300-350 blocks/s in isolation. Root cause: on a 4-core
+  box, torch claims a thread per core and numpy's OpenBLAS backend
+  independently does the same for every CVP matmul - two uncoordinated
+  thread pools oversubscribing every physical core. Mitigation:
+  `OPENBLAS_NUM_THREADS=1` during quantization, or quantize as a
+  separate process from inference/calibration.
+- `benchmarks/benchmark_llm_perplexity.py`'s GPTQ calibration: WikiText
+  -2's `text` field is per-line (headers, short paragraphs); tokenizing
+  lines individually before checking length against the target window
+  silently collected zero calibration samples. Fixed by concatenating
+  first, like the eval text.
+
 ## [2.2.0] - 2026-07-14
 
 ### Added — more borrowed from the Glass Network (glass_windows branch)

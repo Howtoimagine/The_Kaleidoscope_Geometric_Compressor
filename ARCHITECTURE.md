@@ -195,6 +195,37 @@ Two priors fall out of the max-entropy lattice-Gaussian analysis:
   documented as a rate loss. (Falsification-first: the measured negative
   result is part of the architecture record.)
 
+### Measured on a real generative LLM (v2.2, perplexity - not weight SNR)
+
+Every number above this point is weight-space SNR/MSE - a proxy for
+what actually matters. `benchmarks/benchmark_llm_perplexity.py` closes
+that gap: it dequantizes into an actual model and measures WikiText-2
+perplexity after real inference, matching how GPTQ/AWQ papers report
+results, on `Qwen/Qwen3.5-2B-Base` (a real, current hybrid linear/full-
+attention generative model - not a small encoder).
+
+**Honest scope**: exact Leech CVP is too slow to quantize a full 1.37B-
+parameter model in reasonable time (see below), so this measures 3
+representative Linear layers (12.58M params, 0.92% of the model,
+spanning both the gated-linear-attention and full-GQA-attention layer
+types) with everything else held at fp32 - not a full-model result.
+
+| Method | WikiText-2 ppl | bits/weight | ppl delta vs fp32 |
+|---|---|---|---|
+| fp32 (unquantized) | 8.887 | 32.00 | - |
+| RTN INT4 (naive baseline) | 9.242 | 4.00 | +0.355 |
+| **GPTQ INT4** (Frantar et al. 2022, own implementation) | **8.922** | 4.00 | **+0.035** |
+| **KGC TENSOR** (scale=4.0) | **8.957** | 4.08 | **+0.070** |
+
+KGC clearly beats naive RTN at the same bit-width (+0.070 vs +0.355 ppl
+- about 5x less degradation) but does not match GPTQ (+0.070 vs
++0.035 - GPTQ is about 2x closer to fp32). This is the first real
+signal on the question "is this a good LLM quantizer": genuinely
+competitive with a real PTQ baseline, not yet state-of-the-art against
+the specific method (Hessian-based error compensation) it was modeled
+after. Full-model, full-eval-set numbers remain future work pending a
+faster CVP path - see below.
+
 ### Honest limits
 
 - The byte regime loses to LZ codecs on match-heavy data (zlib 4.16x vs
@@ -213,9 +244,31 @@ Two priors fall out of the max-entropy lattice-Gaussian analysis:
   step schedule is a fixed halving sequence (not adaptive to measured
   residual variance), which is the likely fixable cause; untried in
   this pass.
-- Leech CVP is exact but CPU-heavy in pure numpy (~35 blocks/s); a CUDA
-  CVP kernel remains future work. GPU *recall* over stored rows,
-  however, is built and measured (`core/recall_gpu.py` CUDA cores,
+- Leech CVP is exact but CPU-heavy in pure numpy: ~300-350 blocks/s in
+  isolation (steady from N=200 to N=20,000 - no degradation with
+  scale, ~1.2 GB peak after the v2.2 chunking fix below), but measured
+  at ~22 blocks/s (~15x slower) quantizing real layers *inside the
+  same process as a loaded PyTorch model* - torch claims a thread per
+  core (`torch.get_num_threads()` == core count) while numpy's OpenBLAS
+  backend independently tries to do the same for every matmul in the
+  CVP search, and on a 4-core box those two uncoordinated thread pools
+  oversubscribe every physical core. This is a real deployment
+  consideration, not a correctness bug: pin `OPENBLAS_NUM_THREADS=1` or
+  quantize as a separate process from inference/calibration until a
+  CUDA CVP kernel exists. At the isolated rate, the full 1.37B-param
+  model would take ~45 hours; at the measured in-process rate, closer
+  to a month - both are why the v2.2 LLM perplexity benchmark (above)
+  is honestly scoped to 3 layers, not the full model.
+- A v2.2 fix: `batch_nearest_leech_point` computed its per-case
+  `dist_k`/`c_sum_k`/`parity_match` arrays for the *entire* input
+  before chunking anything - ~5.7 GB each at N=175k (one real
+  2048x2048 LLM layer), which OOM-killed the process outright on a
+  15 GB box. Fixed by moving the chunk boundary earlier so every
+  intermediate array is bounded regardless of input size; verified via
+  the full test suite plus direct throughput/memory checks from
+  N=200 to N=20,000.
+- GPU *recall* over stored rows, though distinct from CVP quantization
+  itself, is built and measured (`core/recall_gpu.py` CUDA cores,
   `core/rt_optix.py` RT cores): at a saturating batch the RT-core
   filter is the fastest method (0.009 ms/query, recall 1.000 at
   r=1.5) while at multi-million-row scale the CUDA grid probe wins
