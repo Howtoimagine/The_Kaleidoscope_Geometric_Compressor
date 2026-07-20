@@ -192,14 +192,32 @@ def gptq_quantize_(weight: torch.Tensor, H: torch.Tensor, bits: int = 4,
     d_out, d_in = W.shape
     qmax = 2 ** (bits - 1) - 1
 
-    H = H.clone()
+    H = H.clone().to(torch.float32)
     dead = torch.diag(H) == 0
     H[dead, dead] = 1.0  # avoid singular columns (e.g. never-activated inputs)
-    damp_val = damp * torch.mean(torch.diag(H))
-    H += torch.eye(d_in) * damp_val
+    diag_mean = torch.mean(torch.diag(H))
+    eye = torch.eye(d_in, dtype=H.dtype)
 
-    # Cholesky of H^-1, upper triangular (standard GPTQ formulation)
-    Hinv = torch.linalg.cholesky(torch.linalg.inv(H), upper=True)
+    # Cholesky of H^-1, upper triangular (standard GPTQ formulation).
+    # Escalating damping (Frantar 2022, §3.4): a Hessian estimated from fewer
+    # calibration tokens than input dims is rank-deficient, so the nominal 1%
+    # damping does not admit a float32 Cholesky factor. Retry with doubled
+    # damping until it factors - the unobserved null space is regularized
+    # toward plain rounding, which is the correct fallback where there is no
+    # activation signal to guide error feedback.
+    cur = damp
+    for _ in range(12):
+        try:
+            Hinv = torch.linalg.cholesky(
+                torch.linalg.inv(H + eye * (cur * diag_mean)), upper=True
+            )
+            break
+        except torch._C._LinAlgError:
+            cur *= 2.0
+    else:
+        raise torch._C._LinAlgError(
+            f"GPTQ Cholesky failed even at {cur:.3f} damping"
+        )
 
     for c0 in range(0, d_in, group_size):
         c1 = min(c0 + group_size, d_in)

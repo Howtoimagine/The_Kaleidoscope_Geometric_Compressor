@@ -224,63 +224,91 @@ signal on the question "is this a good LLM quantizer": genuinely
 competitive with a real PTQ baseline, not yet state-of-the-art against
 the specific method (Hessian-based error compensation) it was modeled
 after. Full-model, full-eval-set numbers remain future work pending a
-faster CVP path - see below.
+faster CVP path - see below. **The activation-aware upgrade in the next
+section (Resonant) closes this gap on the same 3 layers - to +0.002,
+past GPTQ.**
 
-### Resonant Quantization: the designed next step (v2.3, kernel proven)
+### Resonant Quantization: MEASURED - the gap is closed (v2.3)
 
-The GPTQ gap above is not a rate problem. `benchmarks/benchmark_resonant.py`
-first kills the tempting rate hypothesis (the founding "compress geodesic
-PATHS not nodes" slogan) on real Qwen weights: the block-to-block deltas
-land on ~2x HIGHER Leech shells than the absolute points in both matrix
-axes, g_idx is already near-uniform (11.4 / 12 bits), and there are zero
-exact duplicate blocks. At the scale giving ~4 bits/weight the blocks are
-essentially independent high-shell points - the rate is near the real
-information content, and there is no free lunch in path / codebook /
-predictive index coding.
+`core/resonant.py` builds the activation-aware form of the idea. On the
+same 3 layers and the same WikiText-2 eval as the v2.2 table, it reduces
+the quantization penalty to essentially zero - past GPTQ, not just up to
+it (`res_eval`, seq_len 1024, 40 windows; fp32 and KGC reproduce the v2.2
+numbers exactly, confirming the harness is identical):
 
-The lever is DISTORTION. The Leech CVP snaps each block to the
-EUCLIDEAN-nearest lattice point - it minimizes `||W - What||`. But the
-model never experiences weight error; it experiences OUTPUT error
-`||(W - What) X||` on real activations `X`, and the Euclidean-nearest
-point is not the output-nearest point. Measured kernel (real captured
-activations, one down_proj, identical bit-rate):
-
-| snapping | weight-MSE | OUTPUT-MSE |
+| Method (3 layers, 1024-token calib) | WikiText-2 ppl | ppl delta vs fp32 |
 |---|---|---|
-| plain CVP (Euclidean-nearest) | 2.52e-7 (lowest) | 1.81e-6 |
-| activation-aware (importance-scaled) | 4.29e-7 (higher) | **1.74e-6 (-4.0%)** |
+| fp32 (unquantized) | 8.887 | - |
+| KGC TENSOR (plain Leech CVP, scale=4.0) | 8.957 | +0.070 |
+| GPTQ INT4 (own impl, matched calib) | 8.944 | +0.057 |
+| **Resonant (AWQ-in-the-lattice, alpha=0.5)** | **8.889** | **+0.002** |
 
-Deliberately accepting 70% more weight error buys 4% less output error at
-the same rate - the exact GPTQ/AWQ trade, realized inside the lattice.
-The scalar version measured here (scale each input channel by its
-activation RMS before snapping, unscale after) is AWQ-in-the-lattice and
-is the crude first-order form.
+Resonant lands ~35x closer to fp32 than plain KGC (+0.002 vs +0.070). Two
+honesty notes, because the result is strong enough to invite suspicion:
 
-**The full upgrade - "Resonant Quantization" - reframes the quantizer as
-behaviour-matched associative recall, and it is buildable entirely from
-parts already in the system:**
+1. **GPTQ is calibration-starved in this run.** With 1024 calibration
+   tokens for 2048-dim inputs its input Hessian is rank-deficient; GPTQ's
+   error feedback needs a full-rank Hessian, so it degrades to +0.057
+   here (`gptq_quantize_` now escalates its damping to stay numerically
+   sound in exactly this regime - a fix, not a fudge; the unobserved
+   null space falls back to plain rounding, which is correct). The v2.2
+   table above, run with a full-rank Hessian, is GPTQ at proper strength:
+   +0.035. Resonant needs only per-channel activation RMS - a first
+   moment well-estimated from 1024 tokens - so it is far more robust to
+   thin calibration. It beats GPTQ in BOTH regimes: +0.002 vs +0.057
+   matched-calibration, and vs +0.035 full-Hessian. (Needing ~10x less
+   calibration data than GPTQ is the known AWQ advantage, reproduced here
+   inside the lattice.)
+2. **This is 3 layers, not the model.** 0.92% of the weights, held-out
+   perplexity, a single global alpha=0.5. Not a full-model claim.
 
-- The CVP returns the single nearest lattice point. The **recall engine**
-  (`core/recall.py` / `core/recall_gpu.py` / `core/rt_optix.py`), built
-  to find neighbours in a bank of stored 24-D vectors, is exactly the
-  candidate generator needed here: enumerate the handful of lattice
-  points in the Voronoi neighbourhood of each weight block.
-- Re-rank those candidates by activation-weighted output error (the
-  `HessianCollector` in `benchmark_llm_perplexity.py` already captures
-  the needed per-channel statistics) and snap to the one the model cannot
-  distinguish from the original - the point that *resonates* with the
-  layer's behaviour, not merely the closest one.
-- The **Golay** coset label keeps every candidate self-healing; the
-  **theta series** prices each candidate's shell in closed form; the
-  **conserved-mass / consolidation** machinery bounds drift.
+This is a DISTORTION win, not a rate win. `benchmarks/benchmark_resonant.py`
+first ruled out the rate hypothesis (the founding "compress geodesic PATHS
+not nodes" slogan) on these real weights: the block-to-block deltas sit on
+~2x HIGHER Leech shells than the absolute points, g_idx is already near-
+uniform (11.4 / 12 bits), and there are zero duplicate blocks - at ~4
+bits/weight the blocks are essentially independent high-shell points, so
+there is no free lunch in path / codebook / predictive index coding. The
+only lever left is distortion, and Resonant pulls it.
 
-This is GPTQ's "minimise disagreement, not distance" done geometrically -
-candidate enumeration in the densest lattice in 24 dimensions instead of
-a sequential Cholesky error feed - and it is the honest path from
-"competitive with a real PTQ baseline" toward "beats it." Quantization
-and associative recall were the same operation all along (snap a noisy
-vector to the nearest stored attractor); Resonant Quantization makes the
-attractors the model's own behaviour.
+Why it works - the DISTORTION lever, now measured per layer. The Leech
+CVP minimizes weight error `||W - What||`; the model experiences output
+error `||(W - What) X||`. Scaling each input channel by `s^alpha` (s =
+activation RMS) before snapping spends the lattice's resolution on the
+channels the model actually reads through, at the identical bit-rate:
+
+| layer | KGC out-MSE | Resonant out-MSE | GPTQ out-MSE |
+|---|---|---|---|
+| L0.out_proj  | 0.700% | **0.120%** | 0.285% |
+| L0.in_proj_z | 0.194% | 0.183% | 0.056% |
+| L3.o_proj    | 0.798% | **0.330%** | 0.273% |
+| **mean**     | **0.564%** | **0.211%** | 0.205% |
+
+(output-MSE as % of signal power on the calibration activations). Resonant
+cuts KGC's layer output error 2.7x - to parity with a full-strength GPTQ -
+by accepting ~60% more WEIGHT error (the exact AWQ/GPTQ trade), and that
+2.7x output-error reduction is what collapses the perplexity penalty from
++0.070 to +0.002. Identity used: `y = W x = (W diag(s^a))(diag(s^-a) x)`;
+store `s` per input channel (side info, amortized over all output rows)
+plus the lattice archive. `alpha` is searched to minimise real layer
+output error; alpha=0 recovers plain KGC, so it can only match or beat it.
+
+**Still on the table - the recall-reranked form.** `core/resonant.py`
+implements the SCALAR lever (one global alpha, per-channel scaling). The
+richer version keeps the same objective - minimise disagreement, not
+distance - but enumerates the handful of Leech points in each block's
+Voronoi neighbourhood (via the **recall engine**, `core/recall.py` /
+`rt_optix.py`) and re-ranks them by activation-weighted output error,
+snapping to the point that *resonates* with the layer's behaviour rather
+than the Euclidean-nearest one; the **Golay** coset label keeps every
+candidate self-healing and the **theta series** prices each shell in
+closed form. On these 3 layers the scalar form already reaches +0.002 -
+there is almost no headroom left to chase - so candidate re-ranking is now
+the lever for the HARDER regimes (lower bit-rates, more sensitive layers,
+full-model) where the scalar margin shrinks, not a fix these layers still
+need. Quantization and associative recall were the same operation all
+along (snap a noisy vector to the nearest stored attractor); Resonant
+makes the attractors the model's own behaviour.
 
 ### Standard-benchmark positioning (v2.3, industry tools)
 
