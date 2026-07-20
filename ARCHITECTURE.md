@@ -282,6 +282,53 @@ and associative recall were the same operation all along (snap a noisy
 vector to the nearest stored attractor); Resonant Quantization makes the
 attractors the model's own behaviour.
 
+### Standard-benchmark positioning (v2.3, industry tools)
+
+Two benchmarks against the recognised competitors, run with their own
+standard tooling and metrics:
+
+**Lossless bytes vs general-purpose codecs** (`benchmark_lossless_std.py`,
+2 MB of enwik8, bits/byte):
+
+| codec | bits/byte |
+|---|---|
+| brotli -11 | **2.24** |
+| xz / LZMA -9 | 2.29 |
+| bzip2 -9 | 2.31 |
+| gzip -9 | 2.90 |
+| KGC bytes (order-2) | 3.10 |
+
+The byte regime loses to every standard codec (1.38x brotli's size,
+worse than gzip) and is ~1000x slower - as expected; it is a verified
+debt container, not an LZ codec. No surprise, now quantified.
+
+**Vector quantization vs FAISS** (`benchmark_faiss_vq.py`, real 384-D
+MiniLM embeddings, recall@10 vs exact top-10) - this is the fair test of
+the system's actual strength, against Product Quantization, the industry-
+standard vector quantizer that does the same job:
+
+| method | bits/vec | recall@10 |
+|---|---|---|
+| OPQ M=64 (learned) | 512 | 0.841 |
+| KGC Leech s=0.75 | 733 | 0.848 |
+| KGC Leech s=1.5 | 1049 | 0.924 |
+| SQ4 (scalar) | 1536 | 0.942 |
+| **KGC Leech s=3.0** | 1413 | **0.960** |
+| SQ8 (scalar) | 3072 | 0.995 |
+
+KGC's fixed-lattice VQ sits *between* scalar and learned quantization: it
+**beats scalar quantization** (0.960 recall @ 1413 bits vs SQ4's 0.942 @
+1536 - better recall, fewer bits, from the Leech lattice's superior 24-D
+packing) but **loses to PQ/OPQ in the aggressive-compression regime**
+(OPQ 0.841 @ 512 bits; KGC needs ~730+ to match). The reason is exactly
+the theme of this whole document: PQ/OPQ *learn* a data-adaptive codebook
+(k-means centroids where the data lives, plus a learned rotation); KGC
+uses the *fixed* lattice and cannot concentrate its bits on the data
+distribution. The gap PQ opens is the measured value of a learned
+codebook - the same thing the consolidation / Resonant machinery above is
+designed to add. Honest current standing: a strong high-fidelity
+quantizer, not yet a PQ replacement for billion-scale ANN.
+
 ### Honest limits
 
 - The byte regime loses to LZ codecs on match-heavy data (zlib 4.16x vs
