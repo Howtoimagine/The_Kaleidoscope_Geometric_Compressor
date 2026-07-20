@@ -226,6 +226,62 @@ the specific method (Hessian-based error compensation) it was modeled
 after. Full-model, full-eval-set numbers remain future work pending a
 faster CVP path - see below.
 
+### Resonant Quantization: the designed next step (v2.3, kernel proven)
+
+The GPTQ gap above is not a rate problem. `benchmarks/benchmark_resonant.py`
+first kills the tempting rate hypothesis (the founding "compress geodesic
+PATHS not nodes" slogan) on real Qwen weights: the block-to-block deltas
+land on ~2x HIGHER Leech shells than the absolute points in both matrix
+axes, g_idx is already near-uniform (11.4 / 12 bits), and there are zero
+exact duplicate blocks. At the scale giving ~4 bits/weight the blocks are
+essentially independent high-shell points - the rate is near the real
+information content, and there is no free lunch in path / codebook /
+predictive index coding.
+
+The lever is DISTORTION. The Leech CVP snaps each block to the
+EUCLIDEAN-nearest lattice point - it minimizes `||W - What||`. But the
+model never experiences weight error; it experiences OUTPUT error
+`||(W - What) X||` on real activations `X`, and the Euclidean-nearest
+point is not the output-nearest point. Measured kernel (real captured
+activations, one down_proj, identical bit-rate):
+
+| snapping | weight-MSE | OUTPUT-MSE |
+|---|---|---|
+| plain CVP (Euclidean-nearest) | 2.52e-7 (lowest) | 1.81e-6 |
+| activation-aware (importance-scaled) | 4.29e-7 (higher) | **1.74e-6 (-4.0%)** |
+
+Deliberately accepting 70% more weight error buys 4% less output error at
+the same rate - the exact GPTQ/AWQ trade, realized inside the lattice.
+The scalar version measured here (scale each input channel by its
+activation RMS before snapping, unscale after) is AWQ-in-the-lattice and
+is the crude first-order form.
+
+**The full upgrade - "Resonant Quantization" - reframes the quantizer as
+behaviour-matched associative recall, and it is buildable entirely from
+parts already in the system:**
+
+- The CVP returns the single nearest lattice point. The **recall engine**
+  (`core/recall.py` / `core/recall_gpu.py` / `core/rt_optix.py`), built
+  to find neighbours in a bank of stored 24-D vectors, is exactly the
+  candidate generator needed here: enumerate the handful of lattice
+  points in the Voronoi neighbourhood of each weight block.
+- Re-rank those candidates by activation-weighted output error (the
+  `HessianCollector` in `benchmark_llm_perplexity.py` already captures
+  the needed per-channel statistics) and snap to the one the model cannot
+  distinguish from the original - the point that *resonates* with the
+  layer's behaviour, not merely the closest one.
+- The **Golay** coset label keeps every candidate self-healing; the
+  **theta series** prices each candidate's shell in closed form; the
+  **conserved-mass / consolidation** machinery bounds drift.
+
+This is GPTQ's "minimise disagreement, not distance" done geometrically -
+candidate enumeration in the densest lattice in 24 dimensions instead of
+a sequential Cholesky error feed - and it is the honest path from
+"competitive with a real PTQ baseline" toward "beats it." Quantization
+and associative recall were the same operation all along (snap a noisy
+vector to the nearest stored attractor); Resonant Quantization makes the
+attractors the model's own behaviour.
+
 ### Honest limits
 
 - The byte regime loses to LZ codecs on match-heavy data (zlib 4.16x vs
