@@ -329,6 +329,31 @@ codebook - the same thing the consolidation / Resonant machinery above is
 designed to add. Honest current standing: a strong high-fidelity
 quantizer, not yet a PQ replacement for billion-scale ANN.
 
+### A falsified fix: learned rotation does not deform the lattice (v2.3)
+
+The obvious way to close the PQ gap is OPQ's trick - learn an orthogonal
+rotation that aligns the data to the quantizer's grid (OPQ's whole edge
+over plain PQ). `core/adaptive.py` implements exactly that for the Leech
+lattice (non-parametric OPQ: alternate lattice-quantize / orthogonal
+Procrustes). **Measured: it does nothing** - plain 3.044e-4 vs learned
+3.041e-4 MSE (0.1%) on real embeddings, and 0.0% even on deliberately
+anisotropic data built for the rotation to exploit.
+
+The reason is fundamental and worth stating: the Leech lattice is near-
+ISOTROPIC (its Voronoi cell is close to spherical), so rotating the data
+does not change how well the lattice tiles it. OPQ's rotation helps PQ
+*because PQ is anisotropic* - axis-aligned subspace codebooks whose
+variance imbalance the rotation fixes; the lattice has no preferred axes.
+The lattice's isotropy is its strength (why it beats scalar quantization)
+and simultaneously why the OPQ trick cannot transfer. The PQ gap is
+therefore STRUCTURAL - it requires a data-adaptive codebook (learned
+centroids), i.e. leaving the lattice for PQ/AQLM. The lever that *does*
+move a lattice quantizer is anisotropic SCALING (per-axis resolution),
+not rotation (which it is invariant to) - which is exactly why the
+activation-aware Resonant kernel worked (+4% on weights) and this did
+not. Kept as a committed negative, in the house style of the glass-
+network's own preregistered falsifiers.
+
 ### Honest limits
 
 - The byte regime loses to LZ codecs on match-heavy data (zlib 4.16x vs
