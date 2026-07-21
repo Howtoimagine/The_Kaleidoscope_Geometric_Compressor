@@ -202,19 +202,22 @@ def resonant_rerank_quantize(
         method                  calib out-MSE   held-out ppl delta
         scalar (rerank=False)       0.94%            +0.025   <- best
         coupling (this, K=4)        0.44%            +0.056
+        coupling + damp=2.0         -                +0.028
         GPTQ INT3                   1.10%            +0.311
 
     Coupling has the lowest CALIBRATION error yet a WORSE held-out perplexity
     than the plain scalar (Euclidean, alpha=0.5) snap - it, like GPTQ, fits
     the rank-deficient 1024-token calibration Hessian (1024 signal + 1024
-    null directions) and does not transfer. The robust first-moment lever
-    (scalar AWQ scaling) wins at 3 bits. So `coupling=True` minimises the
-    calibration output-error, NOT necessarily held-out loss: use it only
-    with Hessian damping (regularise the null space, as GPTQ's percdamp does)
-    and/or enough calibration tokens for a full-rank Hessian. Damped coupling
-    is not yet implemented; until it is, `rerank=False` (scalar Resonant) is
-    the recommended low-bit setting. `sweeps=1` already gets ~+58% of the
-    calibration gain.
+    null directions) and does not transfer. Hessian DAMPING (`damp`, GPTQ's
+    percdamp; tuned on held-out activations to damp=2.0) undoes the overfit -
+    perplexity goes +0.056 -> +0.028 - but only TIES the scalar snap (+0.025),
+    it does not beat it. So the error-feedback machinery buys nothing over
+    plain scalar AWQ scaling at 3 bits, at 8x the cost. `rerank=False`
+    (scalar Resonant) is the recommended low-bit setting - cheapest, and it
+    beats GPTQ 12x (+0.025 vs +0.311). `coupling=True` minimises CALIBRATION
+    output-error, not held-out loss; keep it for other regimes (higher
+    bit-rates, full-rank calibration) where feedback may yet pay.
+    `sweeps=1` already gets ~+58% of the calibration gain.
 
     Returns (What, meta) with meta["points"] the chosen Leech points (the
     codeable index stream, for pricing the rate). rerank=False /

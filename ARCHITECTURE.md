@@ -353,6 +353,7 @@ WikiText-2:
 | KGC (alpha=0) | 2.46% | 9.013 | +0.125 |
 | **scalar-Resonant (alpha=0.5)** | 0.94% | **8.912** | **+0.025** |
 | coupling (K=4, 3 sweeps) | **0.44%** | 8.944 | +0.056 |
+| coupling + damp=2.0 | - | 8.915 | +0.028 |
 | GPTQ INT3 | 1.10% | 9.199 | +0.311 |
 
 The ordering FLIPS between the calibration proxy and the real metric.
@@ -368,15 +369,24 @@ activation RMS - wins, and its margin over both KGC and GPTQ actually
 GROWS at 3 bits (scalar +0.025 vs GPTQ +0.311: 12x). This is the textbook
 AWQ-beats-GPTQ-under-thin-calibration result, reproduced inside the
 lattice, and a caution the whole project earns the hard way: a 60%
-calibration-proxy win was 60% overfitting. The honest 3-bit winner is
-**scalar-Resonant** - lattice coding gain + robust scaling, no feedback.
+calibration-proxy win was 60% overfitting.
 
-The standard fix for the overfitting is Hessian DAMPING (regularise the
-null space, as GPTQ's percdamp does) and/or more calibration tokens for a
-full-rank Hessian; `resonant_rerank_quantize`'s coupling path currently
-uses the raw empirical Hessian, so damped coupling is the clear next
-experiment - it is the honest path to making the coupling's real
-calibration gain actually transfer.
+**Hessian damping was tried, and it closes the case.** Adding
+`damp * mean(diag) * I` to the coupling Hessian (GPTQ's percdamp), tuned
+on HELD-OUT activations (not calibration - the mistake is not repeated),
+lands at damp=2.0: it beats scalar by ~12-20% on held-out output-MSE and
+pulls the perplexity back from +0.056 (overfit) to +0.028 - exactly
+undoing the overfitting the diagnosis predicted. But +0.028 only TIES
+scalar's +0.025 (within eval noise); it does not beat it. So even
+correctly regularised, the error-feedback machinery (8x the CVP cost, a
+sequential coordinate descent) buys NOTHING over plain scalar AWQ scaling
+at 3 bits - robust per-channel scaling already captures essentially all
+the achievable gain in this regime. The honest 3-bit winner is
+**scalar-Resonant** (`rerank=False`): lattice coding gain + robust
+scaling, no feedback, cheapest of all, and it beats GPTQ 12x. Coupling
+(damped or not) is retained as a correct, documented tool and a clean
+negative - feedback may still pay at other bit-rates or with full-rank
+calibration, but it does not here.
 
 ### Standard-benchmark positioning (v2.3, industry tools)
 

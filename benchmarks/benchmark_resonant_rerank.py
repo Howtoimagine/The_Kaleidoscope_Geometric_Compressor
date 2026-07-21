@@ -32,10 +32,12 @@ WARNING - this measures CALIBRATION output-error, and the coupling win does
 NOT transfer. End-to-end 3-bit perplexity (held-out WikiText-2) OVERFITS:
 scalar +0.025 < coupling +0.056 < KGC +0.125 < GPTQ +0.311. Coupling has the
 best calibration fit yet a worse held-out loss than the plain scalar snap -
-it fits the rank-deficient 1024-token Hessian like GPTQ does. The honest
-3-bit winner is scalar-Resonant (rerank=False); damped coupling (regularised
-null space) is the path to making the calibration gain actually transfer.
-A big calibration-proxy win can be mostly overfitting.
+it fits the rank-deficient 1024-token Hessian like GPTQ does. Hessian
+damping (damp=2.0, tuned on held-out) undoes the overfit (+0.056 -> +0.028)
+but only TIES scalar (+0.025) - it does not beat it. So the honest 3-bit
+winner is scalar-Resonant (rerank=False): feedback buys nothing over robust
+scaling here, at 8x the cost. A big calibration-proxy win can be mostly
+overfitting.
 """
 
 import os
