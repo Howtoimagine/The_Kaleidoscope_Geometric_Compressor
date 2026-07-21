@@ -130,3 +130,126 @@ def quantize_inplace(
     else:
         weight[...] = Wq
     return alpha
+
+
+def _next_pow2(n: int) -> int:
+    p = 1
+    while p < n:
+        p <<= 1
+    return p
+
+
+def resonant_rerank_quantize(
+    W: np.ndarray,
+    X: np.ndarray,
+    scale: float = 3.0,
+    alpha: float = 0.5,
+    n_candidates: int = 8,
+    dither: float = 0.4,
+    seed: int = 42,
+    rerank: bool = True,
+) -> Tuple[np.ndarray, dict]:
+    """
+    Recall-reranked Resonant quantization of one Linear weight W [out, in]
+    given calibration activations X [tokens, in].
+
+    Extends resonant_quantize from the SCALAR lever (per-channel AWQ scaling
+    + Euclidean Leech CVP) to candidate RE-RANKING - the "recall engine"
+    idea, minimise disagreement not distance. Per output row: scale by the
+    activation importance s^alpha, apply a randomized Hadamard on the input
+    dim (incoherence), split into 24-D blocks. For each block the Euclidean-
+    nearest Leech point c0 seeds a candidate set (Hessian-whitened dither /
+    list-decode), and the block is snapped to the candidate minimising the
+    activation-weighted output error `(x - c) H_bb (x - c)^T`, where H_bb is
+    the block's local 24x24 input-Hessian. The argmin is invariant to the
+    global lattice scale, so reranking is rate-matched to the Euclidean snap
+    at the same `scale` (verified: the chosen points' index entropy matches).
+
+    MEASURED (Qwen3.5-2B, output-error at matched rate; benchmark_resonant_
+    rerank.py). Reranking beats the Euclidean snap by a real, LAYER- and
+    RATE-dependent margin that grows toward lower bit-rates:
+
+        layer          ~4.1 bits   ~3.7 bits   ~3.45 bits
+        L0.out_proj      +1.0%       +3.0%        +1.6%
+        L3.o_proj        +5.6%       +8.8%        +5.8%
+
+    The gain is small at 4 bits (where the scalar form already nearly
+    saturates), grows to as much as ~+9% near 3.7 bits, then tapers at the
+    coarsest rate as the fixed dither radius and the block-diagonal Hessian
+    proxy cap candidate quality. Full-attention layers (L3.o_proj) carry
+    more per-block anisotropy for reranking to exploit than linear-attention
+    ones (L0.out_proj). The ceiling is the same lattice near-ISOTROPY that
+    made learned rotation useless (core/adaptive.py): the Hadamard
+    incoherence that makes the base quantizer strong also isotropizes each
+    block's Hessian. Reranking is a low-bit-rate top-up on the scalar form,
+    not a second large lever - real, but bounded.
+
+    Returns (What, meta). rerank=False / n_candidates<=1 gives the plain
+    Euclidean snap in this same per-row-Hadamard frame (the baseline).
+    """
+    W = np.asarray(W, dtype=np.float64)
+    X = np.asarray(X, dtype=np.float64)
+    out, ind = W.shape
+
+    s = activation_importance(X)
+    s = np.clip(s / (s.mean() + 1e-12), 1e-3, 1e3)
+    sig = s ** alpha
+    Ws = W * sig[None, :]
+    Hs = (X.T @ X) / (sig[:, None] * sig[None, :])
+
+    # randomized Hadamard on the input dim (pad to a power of 2 for the FWHT)
+    n2 = _next_pow2(ind)
+    if n2 != ind:
+        Ws = np.pad(Ws, ((0, 0), (0, n2 - ind)))
+        Hs = np.pad(Hs, ((0, n2 - ind), (0, n2 - ind)))
+    Wr = transforms.randomized_hadamard(Ws, seed)
+    Hr = transforms.randomized_hadamard(transforms.randomized_hadamard(Hs, seed).T, seed)
+
+    # 24-D blocks along the (transformed) input dim
+    pad = (-n2) % 24
+    if pad:
+        Wr = np.pad(Wr, ((0, 0), (0, pad)))
+    nblk = Wr.shape[1] // 24
+    Hblk = np.zeros((nblk, 24, 24))
+    for b in range(nblk):
+        i0, i1 = b * 24, min(b * 24 + 24, n2)
+        Hblk[b, : i1 - i0, : i1 - i0] = Hr[i0:i1, i0:i1]
+
+    sigma_r = Wr.std() or 1.0
+    fac = scale / sigma_r
+    Xlat = (Wr * fac).reshape(out, nblk, 24)
+
+    rng = np.random.default_rng(seed + 1)
+    chosen = np.empty((out, nblk, 24))
+    for b in range(nblk):
+        xb = Xlat[:, b, :]
+        c0, _, _ = batch_nearest_leech_point(xb)
+        if not rerank or n_candidates <= 1:
+            chosen[:, b, :] = c0
+            continue
+        Hb = Hblk[b]
+        evals, evecs = np.linalg.eigh(Hb + 1e-9 * np.eye(24))
+        inv_sqrt = (evecs * (1.0 / np.sqrt(np.clip(evals, 1e-6, None)))) @ evecs.T
+        inv_sqrt /= np.trace(inv_sqrt) / 24 + 1e-12  # unit average dither scale
+        cands = [c0]
+        for _ in range(n_candidates - 1):
+            eps = rng.standard_normal((out, 24)) @ inv_sqrt
+            ck, _, _ = batch_nearest_leech_point(xb + dither * eps)
+            cands.append(ck)
+        C = np.stack(cands, 0)  # [K, out, 24]
+        diff = xb[None] - C
+        err = np.einsum("kod,de,koe->ko", diff, Hb, diff)  # output-error proxy
+        best = np.argmin(err, axis=0)
+        chosen[:, b, :] = C[best, np.arange(out), :]
+
+    Wq_r = (chosen.reshape(out, nblk * 24) / fac)[:, :n2]
+    Wq_s = transforms.randomized_hadamard(Wq_r, seed, inverse=True)[:, :ind]
+    What = Wq_s / sig[None, :]
+    # `points` are the chosen Leech points (standard coords) - the codeable
+    # index stream, so the caller can price the rate (leech_index_decompose).
+    return What, {
+        "n_candidates": n_candidates,
+        "nblk": nblk,
+        "scale": scale,
+        "points": chosen.reshape(-1, 24),
+    }

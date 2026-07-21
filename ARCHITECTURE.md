@@ -293,22 +293,41 @@ store `s` per input channel (side info, amortized over all output rows)
 plus the lattice archive. `alpha` is searched to minimise real layer
 output error; alpha=0 recovers plain KGC, so it can only match or beat it.
 
-**Still on the table - the recall-reranked form.** `core/resonant.py`
-implements the SCALAR lever (one global alpha, per-channel scaling). The
-richer version keeps the same objective - minimise disagreement, not
-distance - but enumerates the handful of Leech points in each block's
-Voronoi neighbourhood (via the **recall engine**, `core/recall.py` /
-`rt_optix.py`) and re-ranks them by activation-weighted output error,
-snapping to the point that *resonates* with the layer's behaviour rather
-than the Euclidean-nearest one; the **Golay** coset label keeps every
-candidate self-healing and the **theta series** prices each shell in
-closed form. On these 3 layers the scalar form already reaches +0.002 -
-there is almost no headroom left to chase - so candidate re-ranking is now
-the lever for the HARDER regimes (lower bit-rates, more sensitive layers,
-full-model) where the scalar margin shrinks, not a fix these layers still
-need. Quantization and associative recall were the same operation all
-along (snap a noisy vector to the nearest stored attractor); Resonant
-makes the attractors the model's own behaviour.
+**The recall-reranked form - BUILT and MEASURED (v2.4).**
+`resonant_rerank_quantize` (core/resonant.py) keeps the same objective -
+minimise disagreement, not distance - but instead of taking the single
+Euclidean-nearest Leech point per 24-D block, it enumerates a candidate
+set (Hessian-whitened dither / list-decode - the **recall engine** move)
+and snaps to the candidate minimising the activation-weighted output error
+`(x - c) H_bb (x - c)^T` under the block's local 24x24 input-Hessian. The
+argmin is invariant to the global lattice scale, so it is rate-matched to
+the Euclidean snap (verified: the chosen points' Leech index entropy is
+identical). Measured on real weights (`benchmark_resonant_rerank.py`,
+reranked vs Euclidean output-error, matched rate):
+
+| layer | ~4.1 bits | ~3.7 bits | ~3.45 bits |
+|---|---|---|---|
+| L0.out_proj | +1.0% | +3.0% | +1.6% |
+| L3.o_proj | +5.6% | **+8.8%** | +5.8% |
+
+This is exactly what the scalar form's saturation predicted: at 4 bits
+reranking barely helps (the scalar lever already spent the budget), but
+the gain grows toward lower bit-rates - up to ~+9% near 3.7 bits - then
+tapers at the coarsest rate as the fixed dither radius and the block-
+diagonal Hessian proxy cap candidate quality. It is also LAYER-dependent:
+full-attention layers (L3.o_proj) carry more per-block anisotropy for
+reranking to exploit than linear-attention ones (L0.out_proj). The ceiling
+is the same lattice near-ISOTROPY that made learned rotation useless
+(core/adaptive.py) - the Hadamard incoherence that makes the base
+quantizer strong also isotropizes each block's Hessian. Honest verdict:
+reranking is a real, rate- and layer-dependent LOW-BIT top-up on the
+scalar form, not a second large lever, and end-to-end 3-bit perplexity
+(expensive - candidate enumeration costs ~n_candidates x the CVP) is the
+remaining arbiter. The **Golay** coset label still keeps every candidate
+self-healing and the **theta series** prices each shell in closed form.
+Quantization and associative recall were the same operation all along
+(snap a noisy vector to the nearest stored attractor); Resonant makes the
+attractors the model's own behaviour.
 
 ### Standard-benchmark positioning (v2.3, industry tools)
 
