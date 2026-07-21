@@ -26,9 +26,16 @@ output-MSE reduction at every rate, RATE-MATCHED (same bits), an order of
 magnitude past the proxy - and it holds where the proxy collapses, because it
 optimises the exact output error rather than a per-block approximation. It is
 "GPTQ on the Leech lattice": sequential error feedback, but snapping to the
-best of K lattice candidates instead of scalar rounding. End-to-end 3-bit
-perplexity is the remaining arbiter (candidate enumeration is ~n_candidates x
-the scalar CVP cost).
+best of K lattice candidates instead of scalar rounding.
+
+WARNING - this measures CALIBRATION output-error, and the coupling win does
+NOT transfer. End-to-end 3-bit perplexity (held-out WikiText-2) OVERFITS:
+scalar +0.025 < coupling +0.056 < KGC +0.125 < GPTQ +0.311. Coupling has the
+best calibration fit yet a worse held-out loss than the plain scalar snap -
+it fits the rank-deficient 1024-token Hessian like GPTQ does. The honest
+3-bit winner is scalar-Resonant (rerank=False); damped coupling (regularised
+null space) is the path to making the calibration gain actually transfer.
+A big calibration-proxy win can be mostly overfitting.
 """
 
 import os

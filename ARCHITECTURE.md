@@ -340,9 +340,43 @@ The **Golay** coset label keeps every candidate self-healing; the **theta
 series** prices each shell in closed form. Quantization and associative
 recall were the same operation all along (snap a noisy vector to the
 nearest stored attractor); Resonant makes the attractors the model's own
-behaviour. End-to-end 3-bit perplexity (KGC vs scalar-Resonant vs
-coupling vs GPTQ) is the remaining arbiter - expensive, since candidate
-enumeration costs ~n_candidates x the CVP - and is the next run.
+behaviour.
+
+**But the end-to-end 3-bit perplexity says the coupling win is mostly
+OVERFITTING - and it is the most important result in this section.** Run
+on the 3 layers at ~3.07 bits (matched to GPTQ INT3's 3.0), held-out
+WikiText-2:
+
+| method (3-bit) | calibration out-MSE (mean) | held-out ppl | ppl delta |
+|---|---|---|---|
+| fp32 | - | 8.887 | - |
+| KGC (alpha=0) | 2.46% | 9.013 | +0.125 |
+| **scalar-Resonant (alpha=0.5)** | 0.94% | **8.912** | **+0.025** |
+| coupling (K=4, 3 sweeps) | **0.44%** | 8.944 | +0.056 |
+| GPTQ INT3 | 1.10% | 9.199 | +0.311 |
+
+The ordering FLIPS between the calibration proxy and the real metric.
+Coupling has the LOWEST calibration output-error (0.44%, ~2x better than
+scalar) yet a WORSE held-out perplexity than scalar (+0.056 vs +0.025);
+GPTQ likewise fits calibration better than KGC but generalizes far worse
+(+0.311). The aggressive Hessian-fitting methods (coupling, GPTQ) overfit
+the 1024-token calibration Hessian - which is rank-deficient (1024 signal
+directions, 1024 null), so their coordinate/error-feedback descent spends
+effort fitting noise the null space, and it does not transfer. The robust
+first-moment method - scalar AWQ per-channel scaling, which only reads
+activation RMS - wins, and its margin over both KGC and GPTQ actually
+GROWS at 3 bits (scalar +0.025 vs GPTQ +0.311: 12x). This is the textbook
+AWQ-beats-GPTQ-under-thin-calibration result, reproduced inside the
+lattice, and a caution the whole project earns the hard way: a 60%
+calibration-proxy win was 60% overfitting. The honest 3-bit winner is
+**scalar-Resonant** - lattice coding gain + robust scaling, no feedback.
+
+The standard fix for the overfitting is Hessian DAMPING (regularise the
+null space, as GPTQ's percdamp does) and/or more calibration tokens for a
+full-rank Hessian; `resonant_rerank_quantize`'s coupling path currently
+uses the raw empirical Hessian, so damped coupling is the clear next
+experiment - it is the honest path to making the coupling's real
+calibration gain actually transfer.
 
 ### Standard-benchmark positioning (v2.3, industry tools)
 

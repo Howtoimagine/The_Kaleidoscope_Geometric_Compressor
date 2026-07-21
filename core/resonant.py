@@ -192,14 +192,32 @@ def resonant_rerank_quantize(
         ~3.70 bits       +9.6%            +63.7%
         ~3.44 bits       -2.7%            +59.6%
 
-    The coupling objective is the real lever: ~+60% output-MSE reduction at
-    every rate, an order of magnitude past the block-diagonal proxy, and it
-    holds where the proxy collapses. `sweeps=1` already gets ~+58%; extra
-    sweeps add a few percent.
+    The coupling objective cuts the CALIBRATION output-MSE ~+60% at every
+    rate, an order of magnitude past the block-diagonal proxy.
+
+    CAVEAT - it OVERFITS. End-to-end 3-bit perplexity (Qwen3.5-2B, 3 layers,
+    held-out WikiText-2, rate-matched ~3.07 bits) flips the ordering:
+
+        method                  calib out-MSE   held-out ppl delta
+        scalar (rerank=False)       0.94%            +0.025   <- best
+        coupling (this, K=4)        0.44%            +0.056
+        GPTQ INT3                   1.10%            +0.311
+
+    Coupling has the lowest CALIBRATION error yet a WORSE held-out perplexity
+    than the plain scalar (Euclidean, alpha=0.5) snap - it, like GPTQ, fits
+    the rank-deficient 1024-token calibration Hessian (1024 signal + 1024
+    null directions) and does not transfer. The robust first-moment lever
+    (scalar AWQ scaling) wins at 3 bits. So `coupling=True` minimises the
+    calibration output-error, NOT necessarily held-out loss: use it only
+    with Hessian damping (regularise the null space, as GPTQ's percdamp does)
+    and/or enough calibration tokens for a full-rank Hessian. Damped coupling
+    is not yet implemented; until it is, `rerank=False` (scalar Resonant) is
+    the recommended low-bit setting. `sweeps=1` already gets ~+58% of the
+    calibration gain.
 
     Returns (What, meta) with meta["points"] the chosen Leech points (the
     codeable index stream, for pricing the rate). rerank=False /
-    n_candidates<=1 gives the plain Euclidean snap (the baseline).
+    n_candidates<=1 gives the plain Euclidean snap (the recommended baseline).
     """
     W = np.asarray(W, dtype=np.float64)
     X = np.asarray(X, dtype=np.float64)
