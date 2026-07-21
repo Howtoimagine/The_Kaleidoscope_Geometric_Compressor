@@ -1,25 +1,34 @@
 """
 Recall-reranked Resonant quantization - layer-level output-error benchmark.
 
-Stresses candidate RE-RANKING (core.resonant.resonant_rerank_quantize) against
-the plain Euclidean snap in the identical per-row-Hadamard frame, as the rate
-drops from ~4 bits toward ~3 bits, on real Qwen3.5-2B Linear layers. Reports
-the TRUE output error ||(W-What)X||^2/||WX||^2 and the Leech index entropy
-(bits/weight) for each - the comparison is only meaningful if the rate matches,
-so both are printed.
+Compares three snaps in the identical per-row-Hadamard frame, all at the same
+`scale` (rate), on real Qwen3.5-2B layers:
 
-Measured (160-row subset; reranked vs Euclidean, matched rate):
+  euclid     - Euclidean-nearest Leech point (the scalar-Resonant baseline)
+  block-diag - rerank candidates by the block-local proxy (x-c) H_bb (x-c)
+  coupling   - rerank by GAUSS-SEIDEL coordinate descent on the EXACT output
+               error r^T H_r r (GPTQ error feedback across lattice blocks)
 
-    layer          ~4.1 bits   ~3.7 bits   ~3.45 bits
-    L0.out_proj      +1.0%       +3.0%        +1.6%
-    L3.o_proj        +5.6%       +8.8%        +5.8%
+Reports the TRUE output error ||(W-What)X||^2/||WX||^2 and the Leech index
+entropy (bits/weight) - the comparison is only honest if the rate matches, so
+both are printed.
 
-The reranking gain is real, grows toward lower bit-rates (the scalar form
-saturates at 4 bits), is layer-dependent (full-attention layers carry more
-per-block anisotropy), and is bounded by the lattice near-isotropy the
-Hadamard incoherence induces. It is a low-bit-rate top-up, not a second big
-lever. End-to-end perplexity at 3 bits is the remaining arbiter (expensive:
-candidate enumeration is ~n_candidates x the scalar CVP cost).
+Measured (96-row subset, L3.o_proj; reduction vs the Euclidean snap):
+
+    scale/bits     block-diag    coupling (3 sweeps)
+    ~4.11 bits       +7.6%            +62.9%
+    ~3.70 bits       +9.6%            +63.7%
+    ~3.44 bits       -2.7%            +59.6%
+
+The block-diagonal proxy is a weak, non-robust top-up (it even goes negative
+at the coarsest rate). The coupling objective is the real lever: ~+60%
+output-MSE reduction at every rate, RATE-MATCHED (same bits), an order of
+magnitude past the proxy - and it holds where the proxy collapses, because it
+optimises the exact output error rather than a per-block approximation. It is
+"GPTQ on the Leech lattice": sequential error feedback, but snapping to the
+best of K lattice candidates instead of scalar rounding. End-to-end 3-bit
+perplexity is the remaining arbiter (candidate enumeration is ~n_candidates x
+the scalar CVP cost).
 """
 
 import os
@@ -65,22 +74,28 @@ def output_relmse(W, X, What):
     return float((((W - What) @ Xt) ** 2).mean()) / float(((W @ Xt) ** 2).mean())
 
 
-def sweep(W, X, scales, n_candidates=8, dither=0.4, seed=42):
+def sweep(W, X, scales, n_candidates=8, dither=0.4, sweeps=3, seed=42):
     nw = W.size
     for scale in scales:
         t0 = time.time()
-        We, me = resonant_rerank_quantize(W, X, scale=scale, n_candidates=1, rerank=False, seed=seed)
-        eu, be = output_relmse(W, X, We), bits_per_weight(me["points"], nw)
-        Wr, mr = resonant_rerank_quantize(
-            W, X, scale=scale, n_candidates=n_candidates, dither=dither, rerank=True, seed=seed
+        We, me = resonant_rerank_quantize(W, X, scale=scale, rerank=False, seed=seed)
+        Wb, mb = resonant_rerank_quantize(
+            W, X, scale=scale, n_candidates=n_candidates, dither=dither,
+            coupling=False, seed=seed,
         )
-        rr, br = output_relmse(W, X, Wr), bits_per_weight(mr["points"], nw)
-        gain = 100 * (1 - rr / eu)
-        print(
-            f"  scale={scale:.2f}  euclid={eu:.4e} ({be:.2f}b)  "
-            f"rerank={rr:.4e} ({br:.2f}b)  gain={gain:+.1f}%  [{time.time()-t0:.0f}s]",
-            flush=True,
+        Wc, mc = resonant_rerank_quantize(
+            W, X, scale=scale, n_candidates=n_candidates, dither=dither,
+            coupling=True, sweeps=sweeps, seed=seed,
         )
+        eu = output_relmse(W, X, We)
+        be = bits_per_weight(me["points"], nw)
+        gain = lambda v: 100 * (1 - v / eu)
+        print(f"  scale={scale:.2f}  euclid={eu:.4e} ({be:.2f}b)", flush=True)
+        for name, Wq, mq in [("block-diag", Wb, mb), ("coupling", Wc, mc)]:
+            v = output_relmse(W, X, Wq)
+            print(f"      {name:11s} {v:.4e} ({bits_per_weight(mq['points'], nw):.2f}b)  "
+                  f"gain={gain(v):+.1f}%", flush=True)
+        print(f"      [{time.time()-t0:.0f}s]", flush=True)
 
 
 def main():

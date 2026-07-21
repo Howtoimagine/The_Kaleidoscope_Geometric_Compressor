@@ -148,44 +148,58 @@ def resonant_rerank_quantize(
     dither: float = 0.4,
     seed: int = 42,
     rerank: bool = True,
+    coupling: bool = True,
+    sweeps: int = 3,
 ) -> Tuple[np.ndarray, dict]:
     """
     Recall-reranked Resonant quantization of one Linear weight W [out, in]
-    given calibration activations X [tokens, in].
+    given calibration activations X [tokens, in] - "GPTQ on the Leech lattice".
 
-    Extends resonant_quantize from the SCALAR lever (per-channel AWQ scaling
-    + Euclidean Leech CVP) to candidate RE-RANKING - the "recall engine"
-    idea, minimise disagreement not distance. Per output row: scale by the
-    activation importance s^alpha, apply a randomized Hadamard on the input
-    dim (incoherence), split into 24-D blocks. For each block the Euclidean-
-    nearest Leech point c0 seeds a candidate set (Hessian-whitened dither /
-    list-decode), and the block is snapped to the candidate minimising the
-    activation-weighted output error `(x - c) H_bb (x - c)^T`, where H_bb is
-    the block's local 24x24 input-Hessian. The argmin is invariant to the
-    global lattice scale, so reranking is rate-matched to the Euclidean snap
-    at the same `scale` (verified: the chosen points' index entropy matches).
+    Per output row: scale by the activation importance s^alpha, apply a
+    randomized Hadamard on the input dim (incoherence), split into 24-D
+    blocks. Each block's Euclidean-nearest Leech point c0 seeds a candidate
+    set (Hessian-whitened dither / list-decode - the "recall engine" move).
+    The block is then snapped to the candidate that minimises the model's
+    OUTPUT error, not the weight distance.
 
-    MEASURED (Qwen3.5-2B, output-error at matched rate; benchmark_resonant_
-    rerank.py). Reranking beats the Euclidean snap by a real, LAYER- and
-    RATE-dependent margin that grows toward lower bit-rates:
+    Two rerank objectives:
 
-        layer          ~4.1 bits   ~3.7 bits   ~3.45 bits
-        L0.out_proj      +1.0%       +3.0%        +1.6%
-        L3.o_proj        +5.6%       +8.8%        +5.8%
+    * `coupling=False` - block-diagonal proxy `(x-c) H_bb (x-c)^T` using only
+      the block's local 24x24 input-Hessian. Cheap, order-independent, but
+      WEAK: it ignores inter-block error propagation and even goes negative at
+      the coarsest rates (measured -2.7% at ~3.4 bits).
 
-    The gain is small at 4 bits (where the scalar form already nearly
-    saturates), grows to as much as ~+9% near 3.7 bits, then tapers at the
-    coarsest rate as the fixed dither radius and the block-diagonal Hessian
-    proxy cap candidate quality. Full-attention layers (L3.o_proj) carry
-    more per-block anisotropy for reranking to exploit than linear-attention
-    ones (L0.out_proj). The ceiling is the same lattice near-ISOTROPY that
-    made learned rotation useless (core/adaptive.py): the Hadamard
-    incoherence that makes the base quantizer strong also isotropizes each
-    block's Hessian. Reranking is a low-bit-rate top-up on the scalar form,
-    not a second large lever - real, but bounded.
+    * `coupling=True` (default) - GAUSS-SEIDEL coordinate descent on the EXACT
+      output error `r^T H_r r` (r = x - chosen, H_r the full transformed
+      Hessian; exact because the Hadamard is orthogonal). Blocks are updated
+      in sequence; the full gradient `G = r @ H_r` is maintained incrementally
+      so each block sees the fresh coupling `g_b = (G - r_b H_bb)_b` from the
+      blocks already updated, and snaps to argmin `(x-c) H_bb (x-c) + 2(x-c).g_b`.
+      This is GPTQ's error feedback done across LATTICE blocks with candidate
+      enumeration instead of scalar rounding. Because c0 is always a candidate,
+      the true output error is monotone non-increasing (a Jacobi / parallel
+      update instead DIVERGES - it must be sequential).
 
-    Returns (What, meta). rerank=False / n_candidates<=1 gives the plain
-    Euclidean snap in this same per-row-Hadamard frame (the baseline).
+    Both are rate-matched to the Euclidean snap (they pick among the same
+    candidate pool; the chosen points' Leech index entropy is unchanged -
+    verified in benchmark_resonant_rerank.py).
+
+    MEASURED (Qwen3.5-2B L3.o_proj, output-error reduction vs the Euclidean
+    snap, rate-matched):
+
+        scale/bits     block-diag    coupling (3 sweeps)
+        ~4.11 bits       +7.6%            +62.9%
+        ~3.70 bits       +9.6%            +63.7%
+        ~3.44 bits       -2.7%            +59.6%
+
+    The coupling objective is the real lever: ~+60% output-MSE reduction at
+    every rate, an order of magnitude past the block-diagonal proxy, and it
+    holds where the proxy collapses. `sweeps=1` already gets ~+58%; extra
+    sweeps add a few percent.
+
+    Returns (What, meta) with meta["points"] the chosen Leech points (the
+    codeable index stream, for pricing the rate). rerank=False /
+    n_candidates<=1 gives the plain Euclidean snap (the baseline).
     """
     W = np.asarray(W, dtype=np.float64)
     X = np.asarray(X, dtype=np.float64)
@@ -209,47 +223,71 @@ def resonant_rerank_quantize(
     pad = (-n2) % 24
     if pad:
         Wr = np.pad(Wr, ((0, 0), (0, pad)))
+        Hr = np.pad(Hr, ((0, pad), (0, pad)))
     nblk = Wr.shape[1] // 24
-    Hblk = np.zeros((nblk, 24, 24))
-    for b in range(nblk):
-        i0, i1 = b * 24, min(b * 24 + 24, n2)
-        Hblk[b, : i1 - i0, : i1 - i0] = Hr[i0:i1, i0:i1]
+    Hblk = np.stack([Hr[b * 24:(b + 1) * 24, b * 24:(b + 1) * 24] for b in range(nblk)])
 
     sigma_r = Wr.std() or 1.0
     fac = scale / sigma_r
     Xlat = (Wr * fac).reshape(out, nblk, 24)
+    idx = np.arange(out)
 
+    # 1) candidate generation: Euclidean seed + Hessian-whitened dither
     rng = np.random.default_rng(seed + 1)
-    chosen = np.empty((out, nblk, 24))
+    Cand = []
+    seedpts = np.empty((out, nblk, 24))
+    do_rerank = rerank and n_candidates > 1
     for b in range(nblk):
         xb = Xlat[:, b, :]
         c0, _, _ = batch_nearest_leech_point(xb)
-        if not rerank or n_candidates <= 1:
-            chosen[:, b, :] = c0
+        seedpts[:, b, :] = c0
+        if not do_rerank:
+            Cand.append(c0[None])
             continue
-        Hb = Hblk[b]
-        evals, evecs = np.linalg.eigh(Hb + 1e-9 * np.eye(24))
-        inv_sqrt = (evecs * (1.0 / np.sqrt(np.clip(evals, 1e-6, None)))) @ evecs.T
+        ev, V = np.linalg.eigh(Hblk[b] + 1e-9 * np.eye(24))
+        inv_sqrt = (V * (1.0 / np.sqrt(np.clip(ev, 1e-6, None)))) @ V.T
         inv_sqrt /= np.trace(inv_sqrt) / 24 + 1e-12  # unit average dither scale
         cands = [c0]
         for _ in range(n_candidates - 1):
             eps = rng.standard_normal((out, 24)) @ inv_sqrt
             ck, _, _ = batch_nearest_leech_point(xb + dither * eps)
             cands.append(ck)
-        C = np.stack(cands, 0)  # [K, out, 24]
-        diff = xb[None] - C
-        err = np.einsum("kod,de,koe->ko", diff, Hb, diff)  # output-error proxy
-        best = np.argmin(err, axis=0)
-        chosen[:, b, :] = C[best, np.arange(out), :]
+        Cand.append(np.stack(cands, 0))  # [K, out, 24]
+
+    # 2) rerank among candidates
+    chosen = seedpts.copy()
+    if do_rerank and not coupling:
+        for b in range(nblk):
+            diff = Xlat[:, b, :][None] - Cand[b]
+            obj = np.einsum("kod,de,koe->ko", diff, Hblk[b], diff)
+            chosen[:, b, :] = Cand[b][np.argmin(obj, axis=0), idx, :]
+    elif do_rerank:
+        # Gauss-Seidel coordinate descent on the exact output error r^T H_r r
+        r = (Xlat - chosen).reshape(out, -1)
+        G = r @ Hr
+        for _sw in range(max(1, sweeps)):
+            for b in range(nblk):
+                c0i, c1i = b * 24, b * 24 + 24
+                xb, Cb, Hb = Xlat[:, b, :], Cand[b], Hblk[b]
+                r_b = r[:, c0i:c1i]
+                g_b = G[:, c0i:c1i] - r_b @ Hb          # coupling from other blocks
+                diff = xb[None] - Cb
+                obj = np.einsum("kod,de,koe->ko", diff, Hb, diff) \
+                    + 2.0 * np.einsum("kod,od->ko", diff, g_b)
+                new_c = Cb[np.argmin(obj, axis=0), idx, :]
+                new_r_b = xb - new_c
+                chosen[:, b, :] = new_c
+                G += (new_r_b - r_b) @ Hr[c0i:c1i, :]   # incremental gradient
+                r[:, c0i:c1i] = new_r_b
 
     Wq_r = (chosen.reshape(out, nblk * 24) / fac)[:, :n2]
     Wq_s = transforms.randomized_hadamard(Wq_r, seed, inverse=True)[:, :ind]
     What = Wq_s / sig[None, :]
-    # `points` are the chosen Leech points (standard coords) - the codeable
-    # index stream, so the caller can price the rate (leech_index_decompose).
     return What, {
         "n_candidates": n_candidates,
         "nblk": nblk,
         "scale": scale,
+        "coupling": bool(do_rerank and coupling),
+        "sweeps": sweeps,
         "points": chosen.reshape(-1, 24),
     }

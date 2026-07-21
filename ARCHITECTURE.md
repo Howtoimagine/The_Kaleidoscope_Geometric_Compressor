@@ -293,41 +293,56 @@ store `s` per input channel (side info, amortized over all output rows)
 plus the lattice archive. `alpha` is searched to minimise real layer
 output error; alpha=0 recovers plain KGC, so it can only match or beat it.
 
-**The recall-reranked form - BUILT and MEASURED (v2.4).**
-`resonant_rerank_quantize` (core/resonant.py) keeps the same objective -
-minimise disagreement, not distance - but instead of taking the single
-Euclidean-nearest Leech point per 24-D block, it enumerates a candidate
-set (Hessian-whitened dither / list-decode - the **recall engine** move)
-and snaps to the candidate minimising the activation-weighted output error
-`(x - c) H_bb (x - c)^T` under the block's local 24x24 input-Hessian. The
-argmin is invariant to the global lattice scale, so it is rate-matched to
-the Euclidean snap (verified: the chosen points' Leech index entropy is
-identical). Measured on real weights (`benchmark_resonant_rerank.py`,
-reranked vs Euclidean output-error, matched rate):
+**The recall-reranked form - "GPTQ on the Leech lattice" (v2.4).**
+`resonant_rerank_quantize` (core/resonant.py) keeps the objective - minimise
+disagreement, not distance - but instead of the single Euclidean-nearest
+Leech point per 24-D block, it enumerates a candidate set (Hessian-whitened
+dither / list-decode - the **recall engine** move) and snaps to the
+candidate that minimises the model's OUTPUT error. Getting the objective
+right turned out to be the whole game, in two steps:
 
-| layer | ~4.1 bits | ~3.7 bits | ~3.45 bits |
-|---|---|---|---|
-| L0.out_proj | +1.0% | +3.0% | +1.6% |
-| L3.o_proj | +5.6% | **+8.8%** | +5.8% |
+1. **Block-diagonal proxy** - rank candidates by `(x-c) H_bb (x-c)` using
+   only the block's local 24x24 Hessian. This is a WEAK, non-robust top-up
+   (+1..+9%, and it goes *negative* at the coarsest rate) - it ignores how
+   one block's rounding error propagates into every other block.
 
-This is exactly what the scalar form's saturation predicted: at 4 bits
-reranking barely helps (the scalar lever already spent the budget), but
-the gain grows toward lower bit-rates - up to ~+9% near 3.7 bits - then
-tapers at the coarsest rate as the fixed dither radius and the block-
-diagonal Hessian proxy cap candidate quality. It is also LAYER-dependent:
-full-attention layers (L3.o_proj) carry more per-block anisotropy for
-reranking to exploit than linear-attention ones (L0.out_proj). The ceiling
-is the same lattice near-ISOTROPY that made learned rotation useless
-(core/adaptive.py) - the Hadamard incoherence that makes the base
-quantizer strong also isotropizes each block's Hessian. Honest verdict:
-reranking is a real, rate- and layer-dependent LOW-BIT top-up on the
-scalar form, not a second large lever, and end-to-end 3-bit perplexity
-(expensive - candidate enumeration costs ~n_candidates x the CVP) is the
-remaining arbiter. The **Golay** coset label still keeps every candidate
-self-healing and the **theta series** prices each shell in closed form.
-Quantization and associative recall were the same operation all along
-(snap a noisy vector to the nearest stored attractor); Resonant makes the
-attractors the model's own behaviour.
+2. **Coupling (the real lever)** - the exact output error is `r^T H_r r`
+   (r = x - chosen, `H_r` the full transformed Hessian; exact because the
+   Hadamard is orthogonal). Minimise it by GAUSS-SEIDEL coordinate descent:
+   update blocks in sequence, maintain the gradient `G = r @ H_r`
+   incrementally, and snap each block to
+   `argmin (x-c) H_bb (x-c) + 2(x-c).g_b` with the fresh coupling
+   `g_b = (G - r_b H_bb)_b` from the blocks already updated. This is
+   *exactly* GPTQ's error feedback - but across LATTICE blocks, snapping to
+   the best of K candidates instead of scalar rounding. Since c0 is always a
+   candidate the true error is monotone non-increasing; a Jacobi (parallel)
+   update instead DIVERGES and must be sequential.
+
+Measured (L3.o_proj, output-MSE reduction vs the Euclidean snap = scalar
+Resonant, `benchmark_resonant_rerank.py`, RATE-MATCHED - same bits):
+
+| scale / bits | block-diagonal | **coupling (3 sweeps)** |
+|---|---|---|
+| ~4.11 bits | +7.6% | **+62.9%** |
+| ~3.70 bits | +9.6% | **+63.7%** |
+| ~3.44 bits | -2.7% | **+59.6%** |
+
+The coupling objective delivers ~+60% output-MSE reduction at every rate -
+an order of magnitude past the block-diagonal proxy, holding exactly where
+the proxy collapses, and at the SAME bit-rate (the chosen points' Leech
+index entropy is unchanged; it picks *better* candidates, not costlier
+ones). `sweeps=1` already reaches ~+58%, and it generalizes across layer
+types (L0.out_proj, linear-attention: +49% at ~4 bits). This is the point the whole arc
+was aiming at: the lattice's coding gain (denser than scalar in 24-D) AND
+GPTQ's Hessian error feedback, in one quantizer - candidate enumeration in
+the densest lattice in 24 dimensions in place of a scalar Cholesky feed.
+The **Golay** coset label keeps every candidate self-healing; the **theta
+series** prices each shell in closed form. Quantization and associative
+recall were the same operation all along (snap a noisy vector to the
+nearest stored attractor); Resonant makes the attractors the model's own
+behaviour. End-to-end 3-bit perplexity (KGC vs scalar-Resonant vs
+coupling vs GPTQ) is the remaining arbiter - expensive, since candidate
+enumeration costs ~n_candidates x the CVP - and is the next run.
 
 ### Standard-benchmark positioning (v2.3, industry tools)
 
