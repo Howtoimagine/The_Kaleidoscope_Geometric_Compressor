@@ -150,6 +150,7 @@ def resonant_rerank_quantize(
     rerank: bool = True,
     coupling: bool = True,
     sweeps: int = 3,
+    damp: float = 0.0,
 ) -> Tuple[np.ndarray, dict]:
     """
     Recall-reranked Resonant quantization of one Linear weight W [out, in]
@@ -237,6 +238,14 @@ def resonant_rerank_quantize(
     Wr = transforms.randomized_hadamard(Ws, seed)
     Hr = transforms.randomized_hadamard(transforms.randomized_hadamard(Hs, seed).T, seed)
 
+    # Hessian damping (GPTQ percdamp): add damp * mean(diag) * I to regularise
+    # the rank-deficient null space so the coupling descent stops fitting the
+    # unobserved directions of a thin calibration Hessian. mean(diag) is taken
+    # before the 24-padding (padding rows would dilute it). damp=0 is a no-op.
+    if damp > 0:
+        mu = float(np.trace(Hr) / n2)
+        Hr = Hr + (damp * mu) * np.eye(n2)
+
     # 24-D blocks along the (transformed) input dim
     pad = (-n2) % 24
     if pad:
@@ -307,5 +316,6 @@ def resonant_rerank_quantize(
         "scale": scale,
         "coupling": bool(do_rerank and coupling),
         "sweeps": sweeps,
+        "damp": damp,
         "points": chosen.reshape(-1, 24),
     }
